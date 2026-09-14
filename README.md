@@ -29,39 +29,104 @@ Dashboard abhängt, nicht an das, was es *trägt*.
 
 ## Docker
 
-Das Image braucht keine Zustandsdaten, kein Volume und keine Konfigurationsdatei
-– **alles wird über Umgebungsvariablen gesetzt**. Es genügt Bridge-Netzwerk;
-der Container baut nur ausgehende Verbindungen ins LAN auf, zum Dashboard und
+Das Image braucht keine Zustandsdaten, kein Volume und keine
+Konfigurationsdatei – **alles wird über Umgebungsvariablen gesetzt**. Es
+genügt Bridge-Netzwerk und es werden keine Ports veröffentlicht; der
+Container baut nur ausgehende Verbindungen ins LAN auf, zum Dashboard und
 zur Steckdose.
+
+### Image bauen lassen und auf der NAS importieren
+
+Der empfohlene Weg für die UGREEN NAS: GitHub baut das Image, die
+Docker-App importiert die fertige Datei. Keine Registry, kein Anmelden,
+kein Compiler auf der NAS.
+
+**1. Bauen lassen.** Im Repository auf *Actions* → Workflow
+*Tests und Image* → **Run workflow**. Zwei Felder stehen zur Wahl:
+
+| Feld | Für die DXP2800 |
+|---|---|
+| `platform` | `linux/amd64` – die DXP2800 hat einen Intel N100 |
+| `tag` | `latest`, sofern nichts anderes gewünscht ist |
+
+Erst laufen die Tests, dann wird gebaut; zusammen dauert das ein paar
+Minuten.
+
+**2. Herunterladen.** Unten auf der Seite des Laufs hängt unter *Artifacts*
+das Paket `lcd4linux-shelly-amd64`. GitHub packt Artefakte immer in ein
+ZIP – dieses **entpacken**, herauskommt `lcd4linux-shelly-amd64.tar`
+(rund 20 MB). Genau diese `.tar` will die Docker-App, nicht das ZIP.
+
+**3. Auf die NAS legen.** Die Datei in eine Freigabe kopieren, zum Beispiel
+über den Dateimanager von UGOS nach `/volume1/docker/`.
+
+**4. Importieren.** Docker-App → **Image** → **`+`** → **Von NAS** → die
+`.tar` auswählen. Danach steht `lcd4linux-shelly:latest` in der Liste.
+(*Von Paketquelle* daneben lädt aus einer Registry – das wird hier nicht
+gebraucht.)
+
+**5. Container anlegen.** Aus dem importierten Image einen Container
+erstellen und dabei setzen:
+
+* Neustartverhalten: **immer neu starten**
+* Netzwerk: **Bridge** (Standard), keine Portweiterleitung nötig
+* Umgebungsvariablen – mindestens diese drei:
+
+| Variable | Wert |
+|---|---|
+| `TZ` | `Europe/Berlin` |
+| `DASHBOARD_URL` | `http://192.168.178.104:8050/api/state` |
+| `SHELLY_HOST` | die IP der Shelly Plug M Gen3, z. B. `192.168.178.60` |
+
+Alles Weitere ist optional und steht in der Tabelle unter
+[Konfiguration](#konfiguration). Zum Ausprobieren lohnt ein erster Start
+mit `COMMAND=test`: der Container schreibt dann ins Protokoll, ob er
+Dashboard und Steckdose erreicht, und beendet sich wieder. Läuft das
+durch, die Variable wieder entfernen (oder auf `watch` setzen) und den
+Container dauerhaft starten.
+
+Ein Update läuft genauso: Workflow starten, neue `.tar` importieren,
+Container neu erstellen.
+
+### Alternativ: über SSH
+
+Wer lieber auf der Kommandozeile arbeitet, baut das Image direkt auf der
+NAS – es gibt keine kompilierten Abhängigkeiten, das dauert auch auf dem
+N100 nur Sekunden:
+
+```bash
+ssh <benutzer>@<nas-ip>
+sudo mkdir -p /volume1/docker/lcd4linux-shelly
+cd /volume1/docker/lcd4linux-shelly
+sudo git clone https://github.com/CE-Repo/LCD4Linux_Shelly.git .
+sudo nano docker-compose.yml     # DASHBOARD_URL und SHELLY_HOST eintragen
+sudo docker compose up -d --build
+sudo docker compose logs -f
+```
+
+Die mitgelieferte `docker-compose.yml` listet alle Variablen mit Kommentar
+auf. Vor dem Dauerbetrieb lohnt ein Blick, ob der Container beide Seiten
+erreicht:
+
+```bash
+sudo docker compose run --rm lcd4linux-shelly test
+```
+
+Ein Archiv aus dem Actions-Workflow lässt sich auf demselben Weg
+einspielen, ohne zu bauen:
+
+```bash
+sudo docker load -i lcd4linux-shelly-amd64.tar
+```
+
+Und ohne Compose, wenn das Image schon da ist:
 
 ```bash
 docker run -d --name lcd4linux-shelly --restart unless-stopped \
     -e TZ=Europe/Berlin \
     -e DASHBOARD_URL=http://192.168.178.104:8050/api/state \
     -e SHELLY_HOST=192.168.178.60 \
-    ghcr.io/ce-repo/lcd4linux-shelly:latest
-```
-
-Dieses Image entsteht durch den Workflow in `.github/workflows/ci.yml` – er
-läuft bei einem Tag `v*` oder von Hand über *Run workflow*. Solange noch
-nichts veröffentlicht wurde, baut der Weg über `docker compose` das Image
-lokal; dafür wird keine Registry gebraucht.
-
-Mit `docker compose` – die mitgelieferte `docker-compose.yml` listet alle
-Variablen mit Kommentar auf:
-
-```bash
-git clone https://github.com/CE-Repo/LCD4Linux_Shelly.git
-cd LCD4Linux_Shelly
-nano docker-compose.yml          # DASHBOARD_URL und SHELLY_HOST eintragen
-docker compose up -d --build
-docker compose logs -f
-```
-
-Vor dem Dauerbetrieb lohnt ein Blick, ob der Container beide Seiten erreicht:
-
-```bash
-docker compose run --rm lcd4linux-shelly test
+    lcd4linux-shelly:latest
 ```
 
 Der Container läuft als Benutzer `shelly` (UID 1000), nicht als root, und
@@ -77,36 +142,6 @@ Ergebnis und kein Fehler, der Container bleibt dabei `healthy`.
 ```bash
 docker inspect -f '{{.State.Health.Status}}' lcd4linux-shelly
 ```
-
-### Auf der UGREEN NAS (DXP2800 und Verwandte)
-
-Die DXP2800 ist ein x86_64-Gerät (Intel N100), das Image wird für
-`linux/amd64` und `linux/arm64` gebaut – passt also.
-
-**Weg 1 – über die Docker-App in UGOS Pro.** Im App Center *Docker*
-installieren, dort ein Projekt (Compose) anlegen und den Inhalt von
-`docker-compose.yml` einfügen. Da die Oberfläche keine Images baut, muss
-die Zeile `build: .` entfernt werden; es bleibt das `image:` aus der
-Registry. Die Menübezeichnungen unterscheiden sich je nach UGOS-Version
-etwas – gesucht ist die Stelle, an der sich ein Compose-Projekt anlegen lässt.
-
-**Weg 2 – über SSH, funktioniert ohne Registry.** SSH in der Systemsteuerung
-freischalten, dann:
-
-```bash
-ssh <benutzer>@<nas-ip>
-sudo mkdir -p /volume1/docker/lcd4linux-shelly
-cd /volume1/docker/lcd4linux-shelly
-sudo git clone https://github.com/CE-Repo/LCD4Linux_Shelly.git .
-sudo nano docker-compose.yml     # DASHBOARD_URL und SHELLY_HOST eintragen
-sudo docker compose up -d --build
-```
-
-Das Image wird dabei auf der NAS selbst gebaut. Da es keine kompilierten
-Abhängigkeiten gibt, dauert das auch auf dem N100 nur wenige Sekunden.
-
-Bei einem Update genügt `git pull` und noch einmal
-`docker compose up -d --build`.
 
 ### Passwörter
 

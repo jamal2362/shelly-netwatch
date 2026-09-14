@@ -1,7 +1,12 @@
 # lcd4linux-shelly auf der UGREEN NAS (oder jedem anderen Docker-Host).
 #
-#   docker compose up -d --build
+#   docker compose up -d --build     # baut das Image selbst
 #   docker compose logs -f
+#
+# Wurde das Image stattdessen aus dem GitHub-Actions-Archiv importiert
+# ("docker load -i lcd4linux-shelly-amd64.tar" bzw. Docker-App -> Image ->
+# + -> Von NAS), heisst es bereits lcd4linux-shelly:latest und die Zeile
+# "build: ." kann weg.
 #
 # Anzupassen sind nur DASHBOARD_URL und SHELLY_HOST; alles Weitere hat
 # brauchbare Vorgaben und ist hier nur zum Nachschlagen aufgefuehrt.
@@ -9,7 +14,7 @@
 services:
   lcd4linux-shelly:
     build: .
-    image: ghcr.io/ce-repo/lcd4linux-shelly:latest
+    image: lcd4linux-shelly:latest
     container_name: lcd4linux-shelly
     restart: unless-stopped
 

@@ -1,11 +1,22 @@
-name: Tests und Container-Image
+name: Tests und Image
 
 on:
   push:
     branches: ["**"]
-    tags: ["v*"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      platform:
+        description: "Zielplattform (UGREEN DXP2800 = linux/amd64)"
+        type: choice
+        options:
+          - linux/amd64
+          - linux/arm64
+        default: linux/amd64
+      tag:
+        description: "Tag, unter dem das Image nach dem Import heisst"
+        type: string
+        default: latest
 
 jobs:
   tests:
@@ -22,36 +33,45 @@ jobs:
         run: python -m unittest discover -s tests -v
 
   image:
-    # Nur wenn wirklich veroeffentlicht werden soll: bei einem Tag v* oder
-    # von Hand ueber "Run workflow".
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    # Laeuft nur, wenn der Workflow von Hand gestartet wird: Actions ->
+    # "Tests und Image" -> "Run workflow".  Das Ergebnis haengt als
+    # Artefakt an dem Lauf und laesst sich in der Docker-App der NAS
+    # ueber Image -> + -> "Von NAS" importieren.
+    if: github.event_name == 'workflow_dispatch'
     needs: tests
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
     steps:
       - uses: actions/checkout@v4
+
+      - name: Architektur bestimmen
+        id: arch
+        run: echo "name=${PLATFORM##*/}" >> "$GITHUB_OUTPUT"
+        env:
+          PLATFORM: ${{ inputs.platform }}
+
+      # Fremde Architekturen brauchen die Emulation, amd64 nicht.
       - uses: docker/setup-qemu-action@v3
+        if: inputs.platform != 'linux/amd64'
+
       - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/${{ github.repository_owner }}/lcd4linux-shelly
-          tags: |
-            type=raw,value=latest
-            type=ref,event=tag
-            type=sha,format=short
-      - uses: docker/build-push-action@v6
+
+      - name: Image bauen und als Archiv ablegen
+        uses: docker/build-push-action@v6
         with:
           context: .
-          # amd64 fuer die UGREEN NAS (Intel N100), arm64 fuer Pi und Co.
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          platforms: ${{ inputs.platform }}
+          tags: lcd4linux-shelly:${{ inputs.tag }}
+          outputs: type=docker,dest=/tmp/lcd4linux-shelly-${{ steps.arch.outputs.name }}.tar
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Groesse anzeigen
+        run: ls -lh /tmp/lcd4linux-shelly-${{ steps.arch.outputs.name }}.tar
+
+      - name: Archiv als Artefakt anhaengen
+        uses: actions/upload-artifact@v4
+        with:
+          name: lcd4linux-shelly-${{ steps.arch.outputs.name }}
+          path: /tmp/lcd4linux-shelly-${{ steps.arch.outputs.name }}.tar
+          retention-days: 30
+          if-no-files-found: error
