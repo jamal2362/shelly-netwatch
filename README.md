@@ -49,8 +49,12 @@ kein Compiler auf der NAS.
 | `platform` | `linux/amd64` – die DXP2800 hat einen Intel N100 |
 | `tag` | `latest`, sofern nichts anderes gewünscht ist |
 
-Erst laufen die Tests, dann wird gebaut; zusammen dauert das ein paar
-Minuten.
+Erst laufen die Tests, dann wird gebaut; zusammen dauert das gut eine
+Minute.
+
+> Den Knopf *Run workflow* zeigt GitHub nur für Workflows an, die auf dem
+> Standardbranch liegen. Solange die Datei nur in einem Feature-Branch
+> steht, muss dieser erst nach `main` gebracht werden.
 
 **2. Herunterladen.** Unten auf der Seite des Laufs hängt unter *Artifacts*
 das Paket `lcd4linux-shelly-amd64`. GitHub packt Artefakte immer in ein
