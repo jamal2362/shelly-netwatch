@@ -1,0 +1,25 @@
+[Unit]
+Description=Schaltet eine Shelly Plug mit dem LCD4Linux-Webdashboard
+Documentation=https://github.com/CE-Repo/LCD4Linux_Shelly
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/lcd4linux_shelly.py --config /etc/lcd4linux-shelly.ini watch
+Restart=always
+RestartSec=10
+
+# Der Dienst braucht nichts vom System ausser dem Netzwerk.
+DynamicUser=yes
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target
