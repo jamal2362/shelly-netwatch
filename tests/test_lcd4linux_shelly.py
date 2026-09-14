@@ -7,18 +7,31 @@ neither a Shelly nor a running LCD4Linux:
     python3 -m unittest discover -s tests -v
 """
 
+import contextlib
 import hashlib
+import io
 import json
 import os
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import lcd4linux_shelly as app  # noqa: E402
+
+DEFAULT_URL = app.DEFAULTS["dashboard"]["url"]
+
+
+def configparser_defaults():
+    """A configuration with nothing but the built-in defaults in it."""
+    import configparser
+    parser = configparser.ConfigParser()
+    parser.read_dict(app.DEFAULTS)
+    return parser
 
 # The suite provokes errors on purpose; their log lines are not the point.
 app.LOG.addHandler(__import__("logging").NullHandler())
@@ -444,6 +457,140 @@ class ConfigTest(unittest.TestCase):
         self.assertTrue(app.as_bool("TRUE"))
         self.assertFalse(app.as_bool("nein"))
         self.assertFalse(app.as_bool(""))
+
+
+# ---------------------------------------------------------------------------
+# environment (this is how the container is configured)
+# ---------------------------------------------------------------------------
+
+class EnvironmentTest(unittest.TestCase):
+    def empty_config(self):
+        handle = tempfile.NamedTemporaryFile("w", suffix=".ini", delete=False)
+        handle.close()
+        self.addCleanup(os.unlink, handle.name)
+        return handle.name
+
+    def config_from(self, environ, ini=None):
+        config = app.load_config(ini or self.empty_config())
+        return app.apply_environment(config, environ)
+
+    def test_every_section_can_be_set(self):
+        config = self.config_from({
+            "DASHBOARD_URL": "http://box:8050/api/state",
+            "DASHBOARD_OFFLINE_AFTER": "7",
+            "SHELLY_HOST": "10.0.0.5",
+            "SHELLY_CHANNEL": "1",
+            "RESYNC_INTERVAL": "0",
+            "ON_EXIT": "off",
+        })
+        watcher = app.make_watcher(config)
+        self.assertEqual("http://box:8050/api/state", watcher.probe.url)
+        self.assertEqual(7, watcher.offline_after)
+        self.assertEqual("http://10.0.0.5/rpc", watcher.shelly.url)
+        self.assertEqual(1, watcher.shelly.channel)
+        self.assertEqual(0, watcher.resync_interval)
+        self.assertEqual("off", watcher.on_exit)
+
+    def test_every_mapped_name_reaches_a_real_option(self):
+        config = app.load_config(self.empty_config())
+        for name, (section, option) in app.ENV_MAP.items():
+            self.assertTrue(config.has_option(section, option),
+                            "%s points at [%s] %s, which has no default"
+                            % (name, section, option))
+
+    def test_prefixed_name_wins(self):
+        config = self.config_from({"SHELLY_HOST": "bare",
+                                   "L4LS_SHELLY_HOST": "prefixed"})
+        self.assertEqual("prefixed", config["shelly"]["host"])
+
+    def test_value_from_a_file(self):
+        handle = tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False)
+        handle.write("geheim\n")
+        handle.close()
+        self.addCleanup(os.unlink, handle.name)
+        config = self.config_from({"SHELLY_PASSWORD_FILE": handle.name})
+        self.assertEqual("geheim", config["shelly"]["password"])
+
+    def test_file_wins_over_the_plain_value(self):
+        handle = tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False)
+        handle.write("aus-der-datei")
+        handle.close()
+        self.addCleanup(os.unlink, handle.name)
+        config = self.config_from({"SHELLY_PASSWORD": "im-klartext",
+                                   "SHELLY_PASSWORD_FILE": handle.name})
+        self.assertEqual("aus-der-datei", config["shelly"]["password"])
+
+    def test_unreadable_file_stops_the_start(self):
+        with self.assertRaises(SystemExit):
+            self.config_from({"SHELLY_PASSWORD_FILE": "/definitely/not/here"})
+
+    def test_environment_beats_the_ini_file(self):
+        handle = tempfile.NamedTemporaryFile("w", suffix=".ini", delete=False)
+        handle.write("[shelly]\nhost = aus-der-ini\n")
+        handle.close()
+        self.addCleanup(os.unlink, handle.name)
+        config = self.config_from({"SHELLY_HOST": "aus-der-umgebung"},
+                                  ini=handle.name)
+        self.assertEqual("aus-der-umgebung", config["shelly"]["host"])
+
+    def test_command_line_beats_the_environment(self):
+        config = self.config_from({"SHELLY_HOST": "aus-der-umgebung"})
+        args = app.parse_args(["-s", "von-der-kommandozeile"])
+        app.apply_overrides(config, args)
+        self.assertEqual("von-der-kommandozeile", config["shelly"]["host"])
+
+    def test_empty_environment_changes_nothing(self):
+        config = self.config_from({})
+        self.assertEqual(DEFAULT_URL, config["dashboard"]["url"])
+
+
+# ---------------------------------------------------------------------------
+# heartbeat and health check
+# ---------------------------------------------------------------------------
+
+class HealthTest(unittest.TestCase):
+    def setUp(self):
+        handle = tempfile.NamedTemporaryFile("w", suffix=".beat", delete=False)
+        handle.close()
+        self.beat = handle.name
+        os.unlink(self.beat)
+        self.addCleanup(lambda: os.path.exists(self.beat) and os.unlink(self.beat))
+        self.config = app.apply_environment(configparser_defaults(),
+                                            {"HEARTBEAT_FILE": self.beat})
+
+    def test_watcher_writes_the_heartbeat(self):
+        watcher = app.Watcher(FakeProbe([True]), FakePlug(),
+                              heartbeat_file=self.beat, resync_interval=0)
+        watcher.heartbeat()
+        self.assertTrue(os.path.exists(self.beat))
+
+    def health(self, config=None):
+        """command_health without its printing landing in the test output."""
+        with contextlib.redirect_stdout(io.StringIO()):
+            return app.command_health(self.config if config is None else config)
+
+    def test_missing_heartbeat_is_unhealthy(self):
+        self.assertEqual(1, self.health())
+
+    def test_fresh_heartbeat_is_healthy(self):
+        open(self.beat, "w").write("now")
+        self.assertEqual(0, self.health())
+
+    def test_stale_heartbeat_is_unhealthy(self):
+        open(self.beat, "w").write("old")
+        old = time.time() - 3600
+        os.utime(self.beat, (old, old))
+        self.assertEqual(1, self.health())
+
+    def test_without_a_heartbeat_file_health_says_nothing(self):
+        config = configparser_defaults()
+        self.assertEqual(0, self.health(config))
+
+    def test_an_unwritable_path_does_not_kill_the_watcher(self):
+        watcher = app.Watcher(FakeProbe([True]), FakePlug(),
+                              heartbeat_file="/definitely/not/here/beat",
+                              resync_interval=0)
+        watcher.heartbeat()   # logs a debug line and carries on
 
 
 if __name__ == "__main__":

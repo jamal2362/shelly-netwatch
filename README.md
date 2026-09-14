@@ -12,7 +12,8 @@ angeschlossene Display nur dann 230 V bekommt, wenn das Dashboard auch läuft.
 
 Ein einziges Python-Skript, **nur Standardbibliothek** – kein `pip`, kein
 `requests`, kein Compiler. Läuft ab Python 3.7 auf CoreELEC, Raspberry Pi,
-NAS, Router oder einem beliebigen Linux-Rechner im selben Netz.
+NAS, Router oder einem beliebigen Linux-Rechner im selben Netz – oder
+**als Docker-Container, vollständig über Umgebungsvariablen konfiguriert**.
 
 ---
 
@@ -26,7 +27,110 @@ Dashboard abhängt, nicht an das, was es *trägt*.
 
 ---
 
-## Installation
+## Docker
+
+Das Image braucht keine Zustandsdaten, kein Volume und keine Konfigurationsdatei
+– **alles wird über Umgebungsvariablen gesetzt**. Es genügt Bridge-Netzwerk;
+der Container baut nur ausgehende Verbindungen ins LAN auf, zum Dashboard und
+zur Steckdose.
+
+```bash
+docker run -d --name lcd4linux-shelly --restart unless-stopped \
+    -e TZ=Europe/Berlin \
+    -e DASHBOARD_URL=http://192.168.178.104:8050/api/state \
+    -e SHELLY_HOST=192.168.178.60 \
+    ghcr.io/ce-repo/lcd4linux-shelly:latest
+```
+
+Dieses Image entsteht durch den Workflow in `.github/workflows/ci.yml` – er
+läuft bei einem Tag `v*` oder von Hand über *Run workflow*. Solange noch
+nichts veröffentlicht wurde, baut der Weg über `docker compose` das Image
+lokal; dafür wird keine Registry gebraucht.
+
+Mit `docker compose` – die mitgelieferte `docker-compose.yml` listet alle
+Variablen mit Kommentar auf:
+
+```bash
+git clone https://github.com/CE-Repo/LCD4Linux_Shelly.git
+cd LCD4Linux_Shelly
+nano docker-compose.yml          # DASHBOARD_URL und SHELLY_HOST eintragen
+docker compose up -d --build
+docker compose logs -f
+```
+
+Vor dem Dauerbetrieb lohnt ein Blick, ob der Container beide Seiten erreicht:
+
+```bash
+docker compose run --rm lcd4linux-shelly test
+```
+
+Der Container läuft als Benutzer `shelly` (UID 1000), nicht als root, und
+beendet sich auf `docker stop` innerhalb einer Sekunde sauber.
+
+### Healthcheck
+
+Der Watcher berührt nach jeder Abfrage eine Heartbeat-Datei; der eingebaute
+Healthcheck prüft, ob diese frisch ist. **Gesund heißt: der Watcher arbeitet** –
+nicht: das Dashboard ist online. Ein ausgeschaltetes Kodi ist ein gültiges
+Ergebnis und kein Fehler, der Container bleibt dabei `healthy`.
+
+```bash
+docker inspect -f '{{.State.Health.Status}}' lcd4linux-shelly
+```
+
+### Auf der UGREEN NAS (DXP2800 und Verwandte)
+
+Die DXP2800 ist ein x86_64-Gerät (Intel N100), das Image wird für
+`linux/amd64` und `linux/arm64` gebaut – passt also.
+
+**Weg 1 – über die Docker-App in UGOS Pro.** Im App Center *Docker*
+installieren, dort ein Projekt (Compose) anlegen und den Inhalt von
+`docker-compose.yml` einfügen. Da die Oberfläche keine Images baut, muss
+die Zeile `build: .` entfernt werden; es bleibt das `image:` aus der
+Registry. Die Menübezeichnungen unterscheiden sich je nach UGOS-Version
+etwas – gesucht ist die Stelle, an der sich ein Compose-Projekt anlegen lässt.
+
+**Weg 2 – über SSH, funktioniert ohne Registry.** SSH in der Systemsteuerung
+freischalten, dann:
+
+```bash
+ssh <benutzer>@<nas-ip>
+sudo mkdir -p /volume1/docker/lcd4linux-shelly
+cd /volume1/docker/lcd4linux-shelly
+sudo git clone https://github.com/CE-Repo/LCD4Linux_Shelly.git .
+sudo nano docker-compose.yml     # DASHBOARD_URL und SHELLY_HOST eintragen
+sudo docker compose up -d --build
+```
+
+Das Image wird dabei auf der NAS selbst gebaut. Da es keine kompilierten
+Abhängigkeiten gibt, dauert das auch auf dem N100 nur wenige Sekunden.
+
+Bei einem Update genügt `git pull` und noch einmal
+`docker compose up -d --build`.
+
+### Passwörter
+
+Wer das Shelly- oder Dashboard-Passwort nicht im Klartext in der
+Compose-Datei stehen haben will, legt es in eine Datei und verweist mit
+`…_FILE` darauf:
+
+```yaml
+    environment:
+      SHELLY_PASSWORD_FILE: /run/secrets/shelly_password
+    secrets:
+      - shelly_password
+
+secrets:
+  shelly_password:
+    file: ./shelly_password.txt
+```
+
+Das gilt für jede Variable aus der Tabelle weiter unten: zu jedem Namen
+existiert eine `…_FILE`-Variante, die Vorrang hat.
+
+---
+
+## Installation ohne Docker
 
 ```bash
 git clone https://github.com/CE-Repo/LCD4Linux_Shelly.git
@@ -156,7 +260,7 @@ nächste Abfrage versucht es erneut. Der Watcher bleibt in jedem Fall am Leben.
 ## Befehle
 
 ```
-lcd4linux_shelly.py [Optionen] [watch|once|status|on|off|test]
+lcd4linux_shelly.py [Optionen] [watch|once|status|on|off|test|health]
 ```
 
 | Befehl | Wirkung |
@@ -166,6 +270,9 @@ lcd4linux_shelly.py [Optionen] [watch|once|status|on|off|test]
 | `status` | eine Zeile pro Seite; Rückgabewert 0 = online, 2 = offline |
 | `on` / `off` | Steckdose von Hand schalten |
 | `test` | Verbindungstest mit Gerätedaten |
+| `health` | Healthcheck des Containers, siehe oben |
+
+Im Container wird der Befehl über `COMMAND` gewählt, etwa `COMMAND=test`.
 
 Für `cron` statt eines Dienstes:
 
@@ -178,34 +285,51 @@ einmal – für den Dauerbetrieb ist `watch` die bessere Wahl.
 
 ---
 
-## Optionen
+## Konfiguration
 
-Jeder Wert aus der INI-Datei lässt sich auf der Kommandozeile überschreiben.
-Ohne `--config` sucht das Skript der Reihe nach
-`./lcd4linux-shelly.ini`, `~/.config/lcd4linux-shelly.ini`,
-`/etc/lcd4linux-shelly.ini`.
+Jede Einstellung lässt sich auf drei Wegen setzen. Wer gewinnt, steht weiter
+unten; eingebaute Vorgaben < INI-Datei < **Umgebung** < Kommandozeile.
 
-| Option | INI | Standard | Bedeutung |
-|---|---|---|---|
-| `-c`, `--config` | – | – | Konfigurationsdatei |
-| `-d`, `--dashboard-url` | `dashboard.url` | `http://192.168.178.104:8050/api/state` | Adresse des Dashboards |
-| `--dashboard-password` | `dashboard.password` | – | Passwort des Web-Editors |
-| `-s`, `--shelly-host` | `shelly.host` | – | Adresse der Shelly |
-| `--shelly-password` | `shelly.password` | – | Shelly-Passwort |
-| `--channel` | `shelly.channel` | `0` | Schaltkanal |
-| `-i`, `--interval` | `dashboard.interval` | `10` | Sekunden zwischen zwei Abfragen |
-| `--timeout` | `dashboard.timeout` | `4` | Zeitlimit einer Abfrage |
-| `--online-after` | `dashboard.online_after` | `1` | gute Abfragen bis „an“ |
-| `--offline-after` | `dashboard.offline_after` | `3` | Fehlversuche bis „aus“ |
-| `--resync-interval` | `behaviour.resync_interval` | `300` | Nachkorrektur, `0` = aus |
-| `--on-exit` | `behaviour.on_exit` | `keep` | `keep`, `off` oder `on` beim Beenden |
-| `-n`, `--dry-run` | `behaviour.dry_run` | `false` | nur protokollieren |
-| `-v`, `--verbose` | – | – | jede Abfrage protokollieren |
-| `--log-file` | – | – | in eine Datei schreiben |
+| Umgebungsvariable | INI | Kommandozeile | Standard | Bedeutung |
+|---|---|---|---|---|
+| `DASHBOARD_URL` | `dashboard.url` | `-d`, `--dashboard-url` | `http://192.168.178.104:8050/api/state` | Adresse des Dashboards |
+| `DASHBOARD_INTERVAL` | `dashboard.interval` | `-i`, `--interval` | `10` | Sekunden zwischen zwei Abfragen |
+| `DASHBOARD_TIMEOUT` | `dashboard.timeout` | `--timeout` | `4` | Zeitlimit einer Abfrage |
+| `DASHBOARD_ONLINE_AFTER` | `dashboard.online_after` | `--online-after` | `1` | gute Abfragen bis „an“ |
+| `DASHBOARD_OFFLINE_AFTER` | `dashboard.offline_after` | `--offline-after` | `3` | Fehlversuche bis „aus“ |
+| `DASHBOARD_USERNAME` | `dashboard.username` | – | `lcd4linux` | Benutzername des Web-Editors (beliebig) |
+| `DASHBOARD_PASSWORD` | `dashboard.password` | `--dashboard-password` | – | Passwort des Web-Editors |
+| `DASHBOARD_ACCEPT_STATUS` | `dashboard.accept_status` | – | `200,401` | HTTP-Status, die als online gelten; `any` = jede Antwort |
+| `SHELLY_HOST` | `shelly.host` | `-s`, `--shelly-host` | – | Adresse der Shelly |
+| `SHELLY_CHANNEL` | `shelly.channel` | `--channel` | `0` | Schaltkanal |
+| `SHELLY_USERNAME` | `shelly.username` | – | `admin` | bei Shelly immer `admin` |
+| `SHELLY_PASSWORD` | `shelly.password` | `--shelly-password` | – | Shelly-Passwort |
+| `SHELLY_TIMEOUT` | `shelly.timeout` | – | `5` | Zeitlimit eines Schaltbefehls |
+| `SHELLY_RETRIES` | `shelly.retries` | – | `3` | Wiederholungen bei Fehlern |
+| `RESYNC_INTERVAL` | `behaviour.resync_interval` | `--resync-interval` | `300` | Nachkorrektur, `0` = aus |
+| `ON_EXIT` | `behaviour.on_exit` | `--on-exit` | `keep` | `keep`, `off` oder `on` beim Beenden |
+| `DRY_RUN` | `behaviour.dry_run` | `-n`, `--dry-run` | `false` | nur protokollieren, nichts schalten |
+| `VERBOSE` | `behaviour.verbose` | `-v`, `--verbose` | `false` | jede Abfrage protokollieren |
+| `LOG_FILE` | `behaviour.log_file` | `--log-file` | – | in eine Datei statt nach stdout |
+| `HEARTBEAT_FILE` | `behaviour.heartbeat_file` | `--heartbeat-file` | – | Datei für den Healthcheck (im Image gesetzt) |
+| `COMMAND` | – | Positionsargument | `watch` | welcher Befehl ausgeführt wird |
+| `CONFIG_FILE` | – | `-c`, `--config` | – | Pfad zur INI-Datei |
 
-Weitere Werte nur in der INI-Datei: `dashboard.username`,
-`dashboard.accept_status`, `shelly.username`, `shelly.timeout`,
-`shelly.retries`.
+Zwei Dinge gelten für **jeden** dieser Namen:
+
+* **`…_FILE`** – statt `SHELLY_PASSWORD` kann `SHELLY_PASSWORD_FILE` auf eine
+  Datei zeigen, deren Inhalt der Wert ist. Praktisch für Docker-Secrets, und
+  der Wert taucht nicht in `docker inspect` auf. Die `…_FILE`-Variante hat
+  Vorrang vor dem direkten Wert.
+* **`L4LS_`-Präfix** – `L4LS_SHELLY_HOST` wird genauso gelesen wie
+  `SHELLY_HOST` und geht vor. Nur nötig, wenn ein schlichter Name wie
+  `VERBOSE` außerhalb eines Containers mit etwas anderem kollidiert.
+
+Eine INI-Datei ist nirgends Pflicht. Ohne `--config` und ohne `CONFIG_FILE`
+sucht das Skript der Reihe nach `./lcd4linux-shelly.ini`,
+`~/.config/lcd4linux-shelly.ini` und `/etc/lcd4linux-shelly.ini`; findet es
+keine, gelten Vorgaben und Umgebung. `lcd4linux-shelly.example.ini` zeigt
+alle Werte in Dateiform.
 
 ---
 
@@ -220,9 +344,12 @@ Weitere Werte nur in der INI-Datei: `dashboard.username`,
 | `the Shelly rejected the password` | Falsches Passwort. Benutzername ist immer `admin`. |
 | `unknown method Switch.Set` | Ein Gen1-Gerät. Die Gen1-Geräte sprechen `/relay/0?turn=on` statt RPC und werden hier nicht unterstützt. |
 | Steckdose klackert | `offline_after` erhöhen oder `interval` verlängern. |
+| Container erreicht das Dashboard nicht | Aus dem Container heraus prüfen: `docker compose run --rm lcd4linux-shelly test`. Adressen müssen die des LAN sein – `127.0.0.1` zeigt im Container auf den Container selbst. |
+| Container ist `unhealthy` | Der Watcher hat länger als das Dreifache eines Abfragezyklus nichts mehr getan. Ins Log sehen; ein offline gemeldetes Dashboard allein löst das nicht aus. |
+| Zeitstempel im Log gehen falsch | `TZ=Europe/Berlin` setzen. |
 
-Mehr Details liefert `-v`, im Dienst nachzulesen mit
-`journalctl -u lcd4linux-shelly -f`.
+Mehr Details liefert `VERBOSE=true` bzw. `-v`, nachzulesen mit
+`docker compose logs -f` oder `journalctl -u lcd4linux-shelly -f`.
 
 ---
 
@@ -233,8 +360,10 @@ python3 -m unittest discover -s tests -v
 ```
 
 Die Testsuite startet kleine HTTP-Server auf `127.0.0.1`, die ein Dashboard
-und eine Shelly nachstellen – inklusive Digest-Anmeldung. Es wird also weder
-echte Hardware noch ein Netzwerk gebraucht.
+und eine Shelly nachstellen – inklusive Digest-Anmeldung. Geprüft werden
+außerdem die Entprellung, die Nachkorrektur, die Environment-Schicht samt
+`…_FILE` und der Healthcheck. Es wird also weder echte Hardware noch ein
+Netzwerk gebraucht.
 
 ---
 

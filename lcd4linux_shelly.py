@@ -55,8 +55,41 @@ DEFAULTS = {
         "resync_interval": "300",
         "on_exit": "keep",
         "dry_run": "false",
+        "verbose": "false",
+        "log_file": "",
+        "heartbeat_file": "",
     },
 }
+
+# Every option can also be set through the environment, which is how the
+# container is configured.  Names may carry the L4LS_ prefix when a bare
+# name would collide with something else; both spellings are read.
+ENV_MAP = {
+    "DASHBOARD_URL": ("dashboard", "url"),
+    "DASHBOARD_TIMEOUT": ("dashboard", "timeout"),
+    "DASHBOARD_INTERVAL": ("dashboard", "interval"),
+    "DASHBOARD_ONLINE_AFTER": ("dashboard", "online_after"),
+    "DASHBOARD_OFFLINE_AFTER": ("dashboard", "offline_after"),
+    "DASHBOARD_USERNAME": ("dashboard", "username"),
+    "DASHBOARD_PASSWORD": ("dashboard", "password"),
+    "DASHBOARD_ACCEPT_STATUS": ("dashboard", "accept_status"),
+    "SHELLY_HOST": ("shelly", "host"),
+    "SHELLY_CHANNEL": ("shelly", "channel"),
+    "SHELLY_USERNAME": ("shelly", "username"),
+    "SHELLY_PASSWORD": ("shelly", "password"),
+    "SHELLY_TIMEOUT": ("shelly", "timeout"),
+    "SHELLY_RETRIES": ("shelly", "retries"),
+    "RESYNC_INTERVAL": ("behaviour", "resync_interval"),
+    "ON_EXIT": ("behaviour", "on_exit"),
+    "DRY_RUN": ("behaviour", "dry_run"),
+    "VERBOSE": ("behaviour", "verbose"),
+    "LOG_FILE": ("behaviour", "log_file"),
+    "HEARTBEAT_FILE": ("behaviour", "heartbeat_file"),
+}
+
+ENV_PREFIX = "L4LS_"
+
+COMMANDS = ("watch", "once", "status", "on", "off", "test", "health")
 
 TRUE_WORDS = ("1", "true", "yes", "on", "ja", "wahr")
 
@@ -66,6 +99,28 @@ def as_bool(value):
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in TRUE_WORDS
+
+
+def env_value(name, environ=None):
+    """The value of one setting from the environment, or ``None``.
+
+    ``NAME_FILE`` is read first and points at a file holding the value,
+    which is how Docker secrets hand a password to a container without
+    putting it into ``docker inspect``.
+    """
+    environ = os.environ if environ is None else environ
+    for key in (ENV_PREFIX + name + "_FILE", name + "_FILE"):
+        path = environ.get(key)
+        if path:
+            try:
+                with open(path, "r", encoding="utf-8") as handle:
+                    return handle.read().rstrip("\r\n")
+            except OSError as err:
+                raise SystemExit("cannot read %s (%s): %s" % (key, path, err))
+    for key in (ENV_PREFIX + name, name):
+        if key in environ:
+            return environ[key]
+    return None
 
 
 def build_opener():
@@ -314,7 +369,7 @@ class Watcher(object):
 
     def __init__(self, probe, shelly, interval=10.0, online_after=1,
                  offline_after=3, resync_interval=300.0, dry_run=False,
-                 on_exit="keep"):
+                 on_exit="keep", heartbeat_file=""):
         self.probe = probe
         self.shelly = shelly
         self.interval = float(interval)
@@ -323,11 +378,22 @@ class Watcher(object):
         self.resync_interval = float(resync_interval)
         self.dry_run = bool(dry_run)
         self.on_exit = on_exit
+        self.heartbeat_file = heartbeat_file or ""
         self.state = None        # what we believe the plug should be
         self.up = 0
         self.down = 0
         self._last_resync = 0.0
         self._stop = threading.Event()
+
+    def heartbeat(self):
+        """Touch the file the container health check looks at."""
+        if not self.heartbeat_file:
+            return
+        try:
+            with open(self.heartbeat_file, "w") as handle:
+                handle.write("%d\n" % time.time())
+        except OSError as err:
+            LOG.debug("cannot write the heartbeat file: %s", err)
 
     # -- switching ---------------------------------------------------------
     def _switch(self, on, why):
@@ -402,12 +468,14 @@ class Watcher(object):
                  self.shelly.channel)
         LOG.info("switching off after %d failed poll(s), on after %d good one(s)",
                  self.offline_after, self.online_after)
+        self.heartbeat()
         while not self._stop.is_set():
             try:
                 self.step()
             except Exception as err:  # never let the loop die
                 LOG.error("unexpected error: %s", err)
                 LOG.debug("", exc_info=True)
+            self.heartbeat()
             self._stop.wait(self.interval)
         self._finish()
         return 0
@@ -444,6 +512,16 @@ def load_config(path=None):
     return parser
 
 
+def apply_environment(config, environ=None):
+    """The environment beats the file, so a container needs no file at all."""
+    for name in sorted(ENV_MAP):
+        section, option = ENV_MAP[name]
+        value = env_value(name, environ)
+        if value is not None:
+            config.set(section, option, value)
+    return config
+
+
 def apply_overrides(config, args):
     """Command line beats configuration file, and both beat the defaults."""
     mapping = {
@@ -458,6 +536,8 @@ def apply_overrides(config, args):
         "channel": ("shelly", "channel"),
         "resync_interval": ("behaviour", "resync_interval"),
         "on_exit": ("behaviour", "on_exit"),
+        "heartbeat_file": ("behaviour", "heartbeat_file"),
+        "log_file": ("behaviour", "log_file"),
     }
     for attribute, (section, option) in mapping.items():
         value = getattr(args, attribute, None)
@@ -465,6 +545,8 @@ def apply_overrides(config, args):
             config.set(section, option, str(value))
     if getattr(args, "dry_run", False):
         config.set("behaviour", "dry_run", "true")
+    if getattr(args, "verbose", False):
+        config.set("behaviour", "verbose", "true")
     return config
 
 
@@ -497,7 +579,8 @@ def make_watcher(config):
                    resync_interval=behaviour.getfloat("resync_interval",
                                                       fallback=300.0),
                    dry_run=as_bool(behaviour.get("dry_run", "false")),
-                   on_exit=behaviour.get("on_exit", "keep").strip().lower())
+                   on_exit=behaviour.get("on_exit", "keep").strip().lower(),
+                   heartbeat_file=behaviour.get("heartbeat_file", "").strip())
 
 
 def setup_logging(verbose=False, log_file=None):
@@ -513,16 +596,20 @@ def parse_args(argv=None):
         prog="lcd4linux_shelly.py",
         description="Switch a Shelly Plug (Gen2/Gen3) with the LCD4Linux "
                     "web dashboard.")
-    parser.add_argument("command", nargs="?", default="watch",
-                        choices=["watch", "once", "status", "on", "off", "test"],
+    parser.add_argument("command", nargs="?", default=None,
+                        choices=list(COMMANDS),
                         help="watch: keep polling (default); once: a single "
                              "poll and switch; status: print what both sides "
                              "say; on/off: switch by hand; test: check the "
-                             "connection to both sides")
+                             "connection to both sides; health: container "
+                             "health check.  Also settable as COMMAND=...")
     parser.add_argument("-c", "--config", metavar="FILE",
-                        help="INI file, otherwise ./lcd4linux-shelly.ini, "
+                        help="INI file, otherwise $CONFIG_FILE, "
+                             "./lcd4linux-shelly.ini, "
                              "~/.config/lcd4linux-shelly.ini or "
-                             "/etc/lcd4linux-shelly.ini")
+                             "/etc/lcd4linux-shelly.ini.  Every option in it "
+                             "can also be given as an environment variable, "
+                             "which takes precedence")
     parser.add_argument("-d", "--dashboard-url", metavar="URL",
                         help="dashboard URL, e.g. http://192.168.178.104:8050/api/state")
     parser.add_argument("--dashboard-password", metavar="PASSWORD",
@@ -552,6 +639,9 @@ def parse_args(argv=None):
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="log every poll")
     parser.add_argument("--log-file", metavar="FILE", help="log into a file")
+    parser.add_argument("--heartbeat-file", metavar="FILE",
+                        help="file the watcher touches after every poll, "
+                             "read back by the 'health' command")
     parser.add_argument("-V", "--version", action="version",
                         version="lcd4linux-shelly %s" % __version__)
     return parser.parse_args(argv)
@@ -598,25 +688,55 @@ def command_test(config):
     return 0 if online else 2
 
 
+def command_health(config):
+    """Is the watcher still turning?  Used as the container health check."""
+    path = config["behaviour"].get("heartbeat_file", "").strip()
+    if not path:
+        print("no heartbeat file configured")
+        return 0
+    if not os.path.exists(path):
+        print("no heartbeat yet: %s" % path)
+        return 1
+    interval = config["dashboard"].getfloat("interval", fallback=10.0)
+    timeout = config["dashboard"].getfloat("timeout", fallback=4.0)
+    limit = max(3 * (interval + timeout), 30.0)
+    age = time.time() - os.path.getmtime(path)
+    if age > limit:
+        print("the last poll was %.0fs ago (limit %.0fs)" % (age, limit))
+        return 1
+    print("ok, last poll %.0fs ago" % age)
+    return 0
+
+
 def main(argv=None):
     args = parse_args(argv)
-    setup_logging(args.verbose, args.log_file)
-    config = apply_overrides(load_config(args.config), args)
+    config = load_config(args.config or env_value("CONFIG_FILE"))
+    apply_overrides(apply_environment(config), args)
+    behaviour = config["behaviour"]
+    setup_logging(as_bool(behaviour.get("verbose", "false")),
+                  behaviour.get("log_file", "").strip() or None)
 
-    if args.command == "status":
+    command = args.command or env_value("COMMAND") or "watch"
+    if command not in COMMANDS:
+        raise SystemExit("unknown command %r, expected one of %s"
+                         % (command, ", ".join(COMMANDS)))
+
+    if command == "status":
         return command_status(config)
-    if args.command == "test":
+    if command == "test":
         return command_test(config)
+    if command == "health":
+        return command_health(config)
 
-    if args.command in ("on", "off"):
-        want = args.command == "on"
+    if command in ("on", "off"):
+        want = command == "on"
         try:
             shelly = make_shelly(config)
-            if as_bool(config["behaviour"].get("dry_run", "false")):
-                LOG.info("[dry-run] would switch the plug %s", args.command)
+            if as_bool(behaviour.get("dry_run", "false")):
+                LOG.info("[dry-run] would switch the plug %s", command)
             else:
                 shelly.set_output(want)
-                LOG.info("plug switched %s", args.command)
+                LOG.info("plug switched %s", command)
         except ShellyError as err:
             LOG.error("%s", err)
             return 1
@@ -628,8 +748,9 @@ def main(argv=None):
         LOG.error("%s", err)
         return 1
 
-    if args.command == "once":
+    if command == "once":
         watcher.step()
+        watcher.heartbeat()
         return 0
 
     signal.signal(signal.SIGINT, watcher.stop)
