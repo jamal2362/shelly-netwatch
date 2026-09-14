@@ -1,0 +1,82 @@
+name: Tests und Image
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: "Zielplattform (UGREEN DXP2800 = linux/amd64)"
+        type: choice
+        options:
+          - linux/amd64
+          - linux/arm64
+        default: linux/amd64
+      tag:
+        description: "Tag, unter dem das Image nach dem Import heisst"
+        type: string
+        default: latest
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Testsuite
+        run: python -m unittest discover -s tests -v
+
+  image:
+    # Laeuft nur, wenn der Workflow von Hand gestartet wird: Actions ->
+    # "Tests und Image" -> "Run workflow".  Das Ergebnis haengt als
+    # Artefakt an dem Lauf und laesst sich in der Docker-App der NAS
+    # ueber Image -> + -> "Von NAS" importieren.
+    if: github.event_name == 'workflow_dispatch'
+    needs: tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Architektur bestimmen
+        id: arch
+        run: echo "name=${PLATFORM##*/}" >> "$GITHUB_OUTPUT"
+        env:
+          PLATFORM: ${{ inputs.platform }}
+
+      # Fremde Architekturen brauchen die Emulation, amd64 nicht.
+      - uses: docker/setup-qemu-action@v3
+        if: inputs.platform != 'linux/amd64'
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Image bauen und als Archiv ablegen
+        uses: docker/build-push-action@v6
+        env:
+          # Ohne das haengt buildx noch ein .dockerbuild-Protokoll an den
+          # Lauf; unter "Artifacts" soll nur das Image stehen.
+          DOCKER_BUILD_RECORD_UPLOAD: false
+          DOCKER_BUILD_SUMMARY: false
+        with:
+          context: .
+          platforms: ${{ inputs.platform }}
+          tags: lcd4linux-shelly:${{ inputs.tag }}
+          outputs: type=docker,dest=/tmp/lcd4linux-shelly-${{ steps.arch.outputs.name }}.tar
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Groesse anzeigen
+        run: ls -lh /tmp/lcd4linux-shelly-${{ steps.arch.outputs.name }}.tar
+
+      - name: Archiv als Artefakt anhaengen
+        uses: actions/upload-artifact@v4
+        with:
+          name: lcd4linux-shelly-${{ steps.arch.outputs.name }}
+          path: /tmp/lcd4linux-shelly-${{ steps.arch.outputs.name }}.tar
+          retention-days: 30
+          if-no-files-found: error

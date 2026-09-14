@@ -1,0 +1,72 @@
+# lcd4linux-shelly auf der UGREEN NAS (oder jedem anderen Docker-Host).
+#
+#   docker compose up -d --build     # baut das Image selbst
+#   docker compose logs -f
+#
+# Wurde das Image stattdessen aus dem GitHub-Actions-Archiv importiert
+# ("docker load -i lcd4linux-shelly-amd64.tar" bzw. Docker-App -> Image ->
+# + -> Von NAS), heisst es bereits lcd4linux-shelly:latest und die Zeile
+# "build: ." kann weg.
+#
+# Anzupassen sind nur DASHBOARD_URL und SHELLY_HOST; alles Weitere hat
+# brauchbare Vorgaben und ist hier nur zum Nachschlagen aufgefuehrt.
+
+services:
+  lcd4linux-shelly:
+    build: .
+    image: lcd4linux-shelly:latest
+    container_name: lcd4linux-shelly
+    restart: unless-stopped
+
+    # Bridge-Netz genuegt: der Container baut nur ausgehende Verbindungen
+    # ins LAN auf, zum Dashboard und zur Steckdose.
+
+    environment:
+      # -- Zeitzone fuer die Zeitstempel im Log ---------------------------
+      TZ: Europe/Berlin
+
+      # -- Dashboard ------------------------------------------------------
+      DASHBOARD_URL: http://192.168.178.104:8050/api/state
+      DASHBOARD_INTERVAL: "10"          # Sekunden zwischen zwei Abfragen
+      DASHBOARD_TIMEOUT: "4"            # Zeitlimit einer Abfrage
+      DASHBOARD_ONLINE_AFTER: "1"       # gute Abfragen bis "an"
+      DASHBOARD_OFFLINE_AFTER: "3"      # Fehlversuche bis "aus" (~30 s)
+      DASHBOARD_ACCEPT_STATUS: "200,401"
+      # Nur wenn im Add-on ein Web-Passwort gesetzt ist:
+      # DASHBOARD_USERNAME: lcd4linux
+      # DASHBOARD_PASSWORD: geheim
+
+      # -- Shelly Plug M Gen3 ---------------------------------------------
+      SHELLY_HOST: "192.168.178.60"
+      SHELLY_CHANNEL: "0"
+      SHELLY_TIMEOUT: "5"
+      SHELLY_RETRIES: "3"
+      # Nur wenn im Shelly die Authentifizierung aktiv ist
+      # (Benutzername ist dort immer "admin"):
+      # SHELLY_PASSWORD: geheim
+      # ... oder aus einer Datei, siehe den Block ganz unten:
+      # SHELLY_PASSWORD_FILE: /run/secrets/shelly_password
+
+      # -- Verhalten ------------------------------------------------------
+      RESYNC_INTERVAL: "300"            # Nachkorrektur, 0 = aus
+      ON_EXIT: keep                     # keep | off | on
+      DRY_RUN: "false"                  # true = nur protokollieren
+      VERBOSE: "false"                  # true = jede Abfrage ins Log
+      COMMAND: watch                    # watch | once | status | on | off | test
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "3"
+
+# Passwoerter lieber nicht im Klartext in dieser Datei? Dann das Passwort in
+# eine Datei schreiben und die drei Stellen einkommentieren: oben
+# SHELLY_PASSWORD_FILE, hier im Dienst die Zuordnung und unten die Quelle.
+#
+#     secrets:
+#       - shelly_password        <- gehoert in den Dienst, neben "environment"
+#
+# secrets:
+#   shelly_password:
+#     file: ./shelly_password.txt
