@@ -57,6 +57,11 @@ jobs:
 
       - name: Image bauen und als Archiv ablegen
         uses: docker/build-push-action@v6
+        env:
+          # Ohne das haengt buildx noch ein .dockerbuild-Protokoll an den
+          # Lauf; unter "Artifacts" soll nur das Image stehen.
+          DOCKER_BUILD_RECORD_UPLOAD: false
+          DOCKER_BUILD_SUMMARY: false
         with:
           context: .
           platforms: ${{ inputs.platform }}
