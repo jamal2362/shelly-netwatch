@@ -1,12 +1,12 @@
 [Unit]
-Description=Schaltet eine Shelly Plug mit dem LCD4Linux-Webdashboard
-Documentation=https://github.com/CE-Repo/LCD4Linux_Shelly
+Description=Schaltet eine Shelly nach der Erreichbarkeit eines Dienstes im Netz
+Documentation=https://github.com/CE-Repo/shelly-netwatch
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/lcd4linux_shelly.py --config /etc/lcd4linux-shelly.ini watch
+ExecStart=/usr/local/bin/shelly_netwatch.py --config /etc/shelly-netwatch.ini watch
 Restart=always
 RestartSec=10
 

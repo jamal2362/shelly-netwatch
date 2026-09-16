@@ -1,42 +1,44 @@
-# lcd4linux-shelly auf der UGREEN NAS (oder jedem anderen Docker-Host).
+# shelly-netwatch auf der UGREEN NAS (oder jedem anderen Docker-Host).
 #
 #   docker compose up -d --build     # baut das Image selbst
 #   docker compose logs -f
 #
 # Wurde das Image stattdessen aus dem GitHub-Actions-Archiv importiert
-# ("docker load -i lcd4linux-shelly-amd64.tar" bzw. Docker-App -> Image ->
-# + -> Von NAS), heisst es bereits lcd4linux-shelly:latest und die Zeile
+# ("docker load -i shelly-netwatch-amd64.tar" bzw. Docker-App -> Image ->
+# + -> Von NAS), heisst es bereits shelly-netwatch:latest und die Zeile
 # "build: ." kann weg.
 #
-# Anzupassen sind nur DASHBOARD_URL und SHELLY_HOST; alles Weitere hat
+# Anzupassen sind nur TARGET_URL und SHELLY_HOST; alles Weitere hat
 # brauchbare Vorgaben und ist hier nur zum Nachschlagen aufgefuehrt.
 
 services:
-  lcd4linux-shelly:
+  shelly-netwatch:
     build: .
-    image: lcd4linux-shelly:latest
-    container_name: lcd4linux-shelly
+    image: shelly-netwatch:latest
+    container_name: shelly-netwatch
     restart: unless-stopped
 
     # Bridge-Netz genuegt: der Container baut nur ausgehende Verbindungen
-    # ins LAN auf, zum Dashboard und zur Steckdose.
+    # ins LAN auf, zum beobachteten Dienst und zur Steckdose.
 
     environment:
       # -- Zeitzone fuer die Zeitstempel im Log ---------------------------
       TZ: Europe/Berlin
 
-      # -- Dashboard ------------------------------------------------------
-      DASHBOARD_URL: http://192.168.178.104:8050/api/state
-      DASHBOARD_INTERVAL: "10"          # Sekunden zwischen zwei Abfragen
-      DASHBOARD_TIMEOUT: "4"            # Zeitlimit einer Abfrage
-      DASHBOARD_ONLINE_AFTER: "1"       # gute Abfragen bis "an"
-      DASHBOARD_OFFLINE_AFTER: "3"      # Fehlversuche bis "aus" (~30 s)
-      DASHBOARD_ACCEPT_STATUS: "200,401"
-      # Nur wenn im Add-on ein Web-Passwort gesetzt ist:
-      # DASHBOARD_USERNAME: lcd4linux
-      # DASHBOARD_PASSWORD: geheim
+      # -- Das beobachtete Ziel -------------------------------------------
+      # Mit Pfad oder http:// wird die Seite abgefragt, blosses HOST:PORT
+      # ist ein reiner TCP-Test ("antwortet da ueberhaupt jemand?").
+      TARGET_URL: http://192.168.178.104:8050/api/state
+      TARGET_INTERVAL: "10"             # Sekunden zwischen zwei Abfragen
+      TARGET_TIMEOUT: "4"               # Zeitlimit einer Abfrage
+      TARGET_ONLINE_AFTER: "1"          # gute Abfragen bis "an"
+      TARGET_OFFLINE_AFTER: "3"         # Fehlversuche bis "aus" (~30 s)
+      TARGET_ACCEPT_STATUS: "200,401"
+      # Nur wenn der beobachtete Dienst ein Passwort verlangt:
+      # TARGET_USERNAME: shelly-netwatch
+      # TARGET_PASSWORD: geheim
 
-      # -- Shelly Plug M Gen3 ---------------------------------------------
+      # -- Shelly (Gen2/Gen3, z. B. Plug M Gen3) ---------------------------
       SHELLY_HOST: "192.168.178.60"
       SHELLY_CHANNEL: "0"
       SHELLY_TIMEOUT: "5"

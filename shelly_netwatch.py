@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
-"""Keep a Shelly Plug in sync with the LCD4Linux web dashboard.
+"""Keep a Shelly plug in sync with any reachable network service.
 
-The Kodi add-on ``script.lcd4linux`` serves its web dashboard on port 8050.
-This watcher polls that dashboard and mirrors its reachability onto the
-relay of a Shelly Plug (Gen2/Gen3 RPC API):
+This watcher polls one target - an HTTP(S) URL or a plain ``host:port`` -
+and mirrors its reachability onto the relay of a Shelly plug (Gen2/Gen3
+RPC API):
 
-    dashboard reachable  ->  plug switches the 230 V on
-    dashboard gone       ->  plug switches the 230 V off
+    target reachable  ->  plug switches the 230 V on
+    target gone       ->  plug switches the 230 V off
+
+Anything that answers on an IP and a port works: a web dashboard, a media
+player, a printer, an access point, a game server.  The LCD4Linux web
+dashboard of the Kodi add-on ``script.lcd4linux`` is one such target and
+the reason this script exists, but nothing here is tied to it.
 
 Only the standard library is used, so the same file runs on CoreELEC, a
 Raspberry Pi, a NAS or any other box with Python 3.7 or newer.
@@ -22,24 +27,25 @@ import os
 import random
 import re
 import signal
+import socket
 import sys
 import threading
 import time
 import urllib.error
 import urllib.request
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 
-LOG = logging.getLogger("lcd4linux-shelly")
+LOG = logging.getLogger("shelly-netwatch")
 
 DEFAULTS = {
-    "dashboard": {
-        "url": "http://192.168.178.104:8050/api/state",
+    "target": {
+        "url": "",
         "timeout": "4",
         "interval": "10",
         "online_after": "1",
         "offline_after": "3",
-        "username": "lcd4linux",
+        "username": "shelly-netwatch",
         "password": "",
         "accept_status": "200,401",
     },
@@ -62,17 +68,17 @@ DEFAULTS = {
 }
 
 # Every option can also be set through the environment, which is how the
-# container is configured.  Names may carry the L4LS_ prefix when a bare
+# container is configured.  Names may carry the SNW_ prefix when a bare
 # name would collide with something else; both spellings are read.
 ENV_MAP = {
-    "DASHBOARD_URL": ("dashboard", "url"),
-    "DASHBOARD_TIMEOUT": ("dashboard", "timeout"),
-    "DASHBOARD_INTERVAL": ("dashboard", "interval"),
-    "DASHBOARD_ONLINE_AFTER": ("dashboard", "online_after"),
-    "DASHBOARD_OFFLINE_AFTER": ("dashboard", "offline_after"),
-    "DASHBOARD_USERNAME": ("dashboard", "username"),
-    "DASHBOARD_PASSWORD": ("dashboard", "password"),
-    "DASHBOARD_ACCEPT_STATUS": ("dashboard", "accept_status"),
+    "TARGET_URL": ("target", "url"),
+    "TARGET_TIMEOUT": ("target", "timeout"),
+    "TARGET_INTERVAL": ("target", "interval"),
+    "TARGET_ONLINE_AFTER": ("target", "online_after"),
+    "TARGET_OFFLINE_AFTER": ("target", "offline_after"),
+    "TARGET_USERNAME": ("target", "username"),
+    "TARGET_PASSWORD": ("target", "password"),
+    "TARGET_ACCEPT_STATUS": ("target", "accept_status"),
     "SHELLY_HOST": ("shelly", "host"),
     "SHELLY_CHANNEL": ("shelly", "channel"),
     "SHELLY_USERNAME": ("shelly", "username"),
@@ -87,7 +93,25 @@ ENV_MAP = {
     "HEARTBEAT_FILE": ("behaviour", "heartbeat_file"),
 }
 
-ENV_PREFIX = "L4LS_"
+ENV_PREFIX = "SNW_"
+
+# The names this script used while it was called lcd4linux-shelly.  They
+# keep working so an existing container or unit file survives the rename;
+# the new name always wins when both are set.
+LEGACY_ENV_PREFIX = "L4LS_"
+LEGACY_ENV_MAP = {
+    "TARGET_URL": "DASHBOARD_URL",
+    "TARGET_TIMEOUT": "DASHBOARD_TIMEOUT",
+    "TARGET_INTERVAL": "DASHBOARD_INTERVAL",
+    "TARGET_ONLINE_AFTER": "DASHBOARD_ONLINE_AFTER",
+    "TARGET_OFFLINE_AFTER": "DASHBOARD_OFFLINE_AFTER",
+    "TARGET_USERNAME": "DASHBOARD_USERNAME",
+    "TARGET_PASSWORD": "DASHBOARD_PASSWORD",
+    "TARGET_ACCEPT_STATUS": "DASHBOARD_ACCEPT_STATUS",
+}
+
+# Same for the INI file: [dashboard] is read as [target].
+LEGACY_SECTIONS = {"dashboard": "target"}
 
 COMMANDS = ("watch", "once", "status", "on", "off", "test", "health")
 
@@ -101,6 +125,20 @@ def as_bool(value):
     return str(value).strip().lower() in TRUE_WORDS
 
 
+def env_names(name):
+    """Every spelling of one setting, most specific first.
+
+    ``SNW_TARGET_URL`` beats ``TARGET_URL``, and both beat the names from
+    the lcd4linux-shelly days (``L4LS_DASHBOARD_URL``, ``DASHBOARD_URL``).
+    """
+    names = [ENV_PREFIX + name, name]
+    legacy = LEGACY_ENV_MAP.get(name)
+    if legacy:
+        names += [LEGACY_ENV_PREFIX + legacy, legacy]
+    names.append(LEGACY_ENV_PREFIX + name)
+    return names
+
+
 def env_value(name, environ=None):
     """The value of one setting from the environment, or ``None``.
 
@@ -109,7 +147,8 @@ def env_value(name, environ=None):
     putting it into ``docker inspect``.
     """
     environ = os.environ if environ is None else environ
-    for key in (ENV_PREFIX + name + "_FILE", name + "_FILE"):
+    candidates = env_names(name)
+    for key in (candidate + "_FILE" for candidate in candidates):
         path = environ.get(key)
         if path:
             try:
@@ -117,7 +156,7 @@ def env_value(name, environ=None):
                     return handle.read().rstrip("\r\n")
             except OSError as err:
                 raise SystemExit("cannot read %s (%s): %s" % (key, path, err))
-    for key in (ENV_PREFIX + name, name):
+    for key in candidates:
         if key in environ:
             return environ[key]
     return None
@@ -129,17 +168,65 @@ def build_opener():
 
 
 # ---------------------------------------------------------------------------
-# dashboard
+# the watched target
 # ---------------------------------------------------------------------------
 
-class Probe(object):
-    """Asks the LCD4Linux web dashboard whether it is still there."""
+def split_host_port(text, default_port=None):
+    """``host:port`` into its two halves, IPv6 brackets included."""
+    text = (text or "").strip()
+    if text.startswith("["):
+        host, _, rest = text[1:].partition("]")
+        port = rest.lstrip(":")
+    else:
+        host, _, port = text.rpartition(":")
+        if not host:  # no colon at all
+            host, port = text, ""
+    if not port:
+        port = default_port
+    if not host or not port:
+        raise SystemExit("a target without a scheme needs a port, "
+                         "e.g. 192.168.178.104:8050")
+    try:
+        return host, int(port)
+    except ValueError:
+        raise SystemExit("%r is not a port number" % (port,))
+
+
+class TcpProbe(object):
+    """Asks whether something accepts connections on an IP and a port.
+
+    The plainest check there is: open a socket, close it again.  Good for
+    everything that speaks no HTTP - SSH, SMB, a printer, a game server -
+    and for web servers whose answer does not matter.
+    """
+
+    def __init__(self, url, timeout=4.0, **_ignored):
+        rest = url.split("://", 1)[1] if "://" in url else url
+        self.host, self.port = split_host_port(rest)
+        self.timeout = float(timeout)
+        self.url = "tcp://%s:%d" % (self.host, self.port)
+
+    def check(self):
+        """Return ``(online, reason)`` for a single poll."""
+        try:
+            connection = socket.create_connection((self.host, self.port),
+                                                  timeout=self.timeout)
+        except OSError as err:
+            return False, err.strerror or str(err)
+        except Exception as err:
+            return False, str(err)
+        connection.close()
+        return True, "port %d open" % self.port
+
+
+class HttpProbe(object):
+    """Asks an HTTP(S) service whether it is still there."""
 
     def __init__(self, url, timeout=4.0, username="", password="",
                  accept_status="200,401"):
         self.url = url
         self.timeout = float(timeout)
-        self.username = username or "lcd4linux"
+        self.username = username or "shelly-netwatch"
         self.password = password or ""
         self.accept = self._parse_accept(accept_status)
         self._opener = build_opener()
@@ -160,7 +247,7 @@ class Probe(object):
 
     def _request(self):
         request = urllib.request.Request(self.url, method="GET")
-        request.add_header("User-Agent", "lcd4linux-shelly/%s" % __version__)
+        request.add_header("User-Agent", "shelly-netwatch/%s" % __version__)
         if self.password:
             token = "%s:%s" % (self.username, self.password)
             request.add_header("Authorization", "Basic %s"
@@ -173,8 +260,8 @@ class Probe(object):
             response = self._request()
         except urllib.error.HTTPError as err:
             # The server answered, it just did not like the request.  A 401
-            # means the dashboard is up and asking for its password, which
-            # is still "online" as far as the plug is concerned.
+            # means the service is up and asking for its password, which is
+            # still "online" as far as the plug is concerned.
             err.read()
             code = err.code
             if self.accept is None or code in self.accept:
@@ -192,6 +279,38 @@ class Probe(object):
         if self.accept is None or code in self.accept:
             return True, "HTTP %d" % code
         return False, "HTTP %d" % code
+
+
+def normalise_target(url):
+    """Fill in what a hand-written target address leaves out.
+
+    ``192.168.178.104:8050`` is a TCP check, ``box:8050/api/state`` is
+    HTTP, and anything with a scheme is taken as it stands.
+    """
+    url = (url or "").strip()
+    if not url:
+        raise SystemExit("no target configured (set target.url, TARGET_URL "
+                         "or --target-url)")
+    if "://" in url:
+        return url
+    if "/" in url:  # host:port/path - clearly meant as a web address
+        return "http://" + url
+    split_host_port(url)  # validates, raises with a helpful message
+    return "tcp://" + url
+
+
+def make_probe_for(url, timeout=4.0, username="", password="",
+                   accept_status="200,401"):
+    """The right probe for a target address."""
+    url = normalise_target(url)
+    scheme = url.split("://", 1)[0].lower()
+    if scheme == "tcp":
+        return TcpProbe(url, timeout=timeout)
+    if scheme in ("http", "https"):
+        return HttpProbe(url, timeout=timeout, username=username,
+                         password=password, accept_status=accept_status)
+    raise SystemExit("unsupported target scheme %r, expected http, https "
+                     "or tcp" % scheme)
 
 
 # ---------------------------------------------------------------------------
@@ -277,7 +396,7 @@ class Shelly(object):
     def _post(self, body, auth=None):
         request = urllib.request.Request(self.url, data=body, method="POST")
         request.add_header("Content-Type", "application/json")
-        request.add_header("User-Agent", "lcd4linux-shelly/%s" % __version__)
+        request.add_header("User-Agent", "shelly-netwatch/%s" % __version__)
         if auth:
             request.add_header("Authorization", auth)
         try:
@@ -291,7 +410,7 @@ class Shelly(object):
 
     def _call_once(self, method, params):
         self._id += 1
-        payload = {"id": self._id, "src": "lcd4linux-shelly", "method": method}
+        payload = {"id": self._id, "src": "shelly-netwatch", "method": method}
         if params:
             payload["params"] = params
         body = json.dumps(payload).encode("utf-8")
@@ -360,11 +479,11 @@ class Shelly(object):
 # ---------------------------------------------------------------------------
 
 class Watcher(object):
-    """Polls the dashboard and switches the plug when the answer changes.
+    """Polls the target and switches the plug when the answer changes.
 
     A single missed poll does not cut the power: ``offline_after`` failures
     in a row are needed before the plug goes off, which rides out the short
-    gaps a reloading add-on or a busy network produces.
+    gaps a restarting service or a busy network produces.
     """
 
     def __init__(self, probe, shelly, interval=10.0, online_after=1,
@@ -432,25 +551,25 @@ class Watcher(object):
         else:
             self.down += 1
             self.up = 0
-        LOG.debug("dashboard %s (%s), up=%d down=%d",
+        LOG.debug("target %s (%s), up=%d down=%d",
                   "online" if online else "offline", reason, self.up, self.down)
 
-        target = None
+        want = None
         if online and self.state is not True and self.up >= self.online_after:
-            target = True
+            want = True
         elif not online and self.state is not False and self.down >= self.offline_after:
-            target = False
+            want = False
 
-        if target is not None:
+        if want is not None:
             if self.state is None:
-                why = "dashboard is %s" % ("online" if target else "offline")
+                why = "target is %s" % ("online" if want else "offline")
             else:
-                why = "dashboard went %s" % ("online" if target else "offline")
+                why = "target went %s" % ("online" if want else "offline")
             LOG.info("%s: %s", why, reason)
-            if self._switch(target, reason):
-                self.state = target
+            if self._switch(want, reason):
+                self.state = want
                 self._last_resync = time.time()
-            return target
+            return want
 
         if self.resync_interval > 0 and self.state is not None:
             if time.time() - self._last_resync >= self.resync_interval:
@@ -493,6 +612,28 @@ class Watcher(object):
 # configuration and command line
 # ---------------------------------------------------------------------------
 
+CONFIG_NAMES = ("shelly-netwatch.ini", "lcd4linux-shelly.ini")
+
+
+def config_candidates():
+    """Where an INI file is looked for, best name first."""
+    for name in CONFIG_NAMES:
+        yield name
+        yield os.path.expanduser("~/.config/" + name)
+        yield "/etc/" + name
+
+
+def fold_legacy_sections(parser):
+    """Read an old [dashboard] section as if it said [target]."""
+    for old, new in LEGACY_SECTIONS.items():
+        if not parser.has_section(old):
+            continue
+        for option, value in parser.items(old):
+            parser.set(new, option, value)
+        parser.remove_section(old)
+    return parser
+
+
 def load_config(path=None):
     """Defaults, overlaid with an INI file when there is one."""
     parser = configparser.ConfigParser()
@@ -502,14 +643,12 @@ def load_config(path=None):
             raise SystemExit("configuration file not found: %s" % path)
         parser.read(path, encoding="utf-8")
     else:
-        for candidate in ("lcd4linux-shelly.ini",
-                          os.path.expanduser("~/.config/lcd4linux-shelly.ini"),
-                          "/etc/lcd4linux-shelly.ini"):
+        for candidate in config_candidates():
             if os.path.isfile(candidate):
                 parser.read(candidate, encoding="utf-8")
                 LOG.debug("configuration read from %s", candidate)
                 break
-    return parser
+    return fold_legacy_sections(parser)
 
 
 def apply_environment(config, environ=None):
@@ -525,12 +664,12 @@ def apply_environment(config, environ=None):
 def apply_overrides(config, args):
     """Command line beats configuration file, and both beat the defaults."""
     mapping = {
-        "dashboard_url": ("dashboard", "url"),
-        "dashboard_password": ("dashboard", "password"),
-        "interval": ("dashboard", "interval"),
-        "timeout": ("dashboard", "timeout"),
-        "online_after": ("dashboard", "online_after"),
-        "offline_after": ("dashboard", "offline_after"),
+        "target_url": ("target", "url"),
+        "target_password": ("target", "password"),
+        "interval": ("target", "interval"),
+        "timeout": ("target", "timeout"),
+        "online_after": ("target", "online_after"),
+        "offline_after": ("target", "offline_after"),
         "shelly_host": ("shelly", "host"),
         "shelly_password": ("shelly", "password"),
         "channel": ("shelly", "channel"),
@@ -551,12 +690,12 @@ def apply_overrides(config, args):
 
 
 def make_probe(config):
-    section = config["dashboard"]
-    return Probe(section.get("url"),
-                 timeout=section.getfloat("timeout", fallback=4.0),
-                 username=section.get("username", ""),
-                 password=section.get("password", ""),
-                 accept_status=section.get("accept_status", "200,401"))
+    section = config["target"]
+    return make_probe_for(section.get("url"),
+                          timeout=section.getfloat("timeout", fallback=4.0),
+                          username=section.get("username", ""),
+                          password=section.get("password", ""),
+                          accept_status=section.get("accept_status", "200,401"))
 
 
 def make_shelly(config):
@@ -570,12 +709,12 @@ def make_shelly(config):
 
 
 def make_watcher(config):
-    dashboard = config["dashboard"]
+    target = config["target"]
     behaviour = config["behaviour"]
     return Watcher(make_probe(config), make_shelly(config),
-                   interval=dashboard.getfloat("interval", fallback=10.0),
-                   online_after=dashboard.getint("online_after", fallback=1),
-                   offline_after=dashboard.getint("offline_after", fallback=3),
+                   interval=target.getfloat("interval", fallback=10.0),
+                   online_after=target.getint("online_after", fallback=1),
+                   offline_after=target.getint("offline_after", fallback=3),
                    resync_interval=behaviour.getfloat("resync_interval",
                                                       fallback=300.0),
                    dry_run=as_bool(behaviour.get("dry_run", "false")),
@@ -593,9 +732,9 @@ def setup_logging(verbose=False, log_file=None):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
-        prog="lcd4linux_shelly.py",
-        description="Switch a Shelly Plug (Gen2/Gen3) with the LCD4Linux "
-                    "web dashboard.")
+        prog="shelly_netwatch.py",
+        description="Switch a Shelly plug (Gen2/Gen3) with the reachability "
+                    "of any network service.")
     parser.add_argument("command", nargs="?", default=None,
                         choices=list(COMMANDS),
                         help="watch: keep polling (default); once: a single "
@@ -605,15 +744,20 @@ def parse_args(argv=None):
                              "health check.  Also settable as COMMAND=...")
     parser.add_argument("-c", "--config", metavar="FILE",
                         help="INI file, otherwise $CONFIG_FILE, "
-                             "./lcd4linux-shelly.ini, "
-                             "~/.config/lcd4linux-shelly.ini or "
-                             "/etc/lcd4linux-shelly.ini.  Every option in it "
+                             "./shelly-netwatch.ini, "
+                             "~/.config/shelly-netwatch.ini or "
+                             "/etc/shelly-netwatch.ini.  Every option in it "
                              "can also be given as an environment variable, "
                              "which takes precedence")
-    parser.add_argument("-d", "--dashboard-url", metavar="URL",
-                        help="dashboard URL, e.g. http://192.168.178.104:8050/api/state")
-    parser.add_argument("--dashboard-password", metavar="PASSWORD",
-                        help="password of the LCD4Linux web editor, if one is set")
+    parser.add_argument("-t", "--target-url", "-d", "--dashboard-url",
+                        metavar="URL", dest="target_url",
+                        help="what to watch: an http(s) URL such as "
+                             "http://192.168.178.104:8050/api/state, or a bare "
+                             "HOST:PORT such as 192.168.178.104:8050 for a "
+                             "plain TCP check")
+    parser.add_argument("--target-password", "--dashboard-password",
+                        metavar="PASSWORD", dest="target_password",
+                        help="password of the watched service, if it wants one")
     parser.add_argument("-s", "--shelly-host", metavar="HOST",
                         help="address of the Shelly Plug, e.g. 192.168.178.60")
     parser.add_argument("--shelly-password", metavar="PASSWORD",
@@ -643,30 +787,32 @@ def parse_args(argv=None):
                         help="file the watcher touches after every poll, "
                              "read back by the 'health' command")
     parser.add_argument("-V", "--version", action="version",
-                        version="lcd4linux-shelly %s" % __version__)
+                        version="shelly-netwatch %s" % __version__)
     return parser.parse_args(argv)
 
 
 def command_status(config):
-    online, reason = make_probe(config).check()
-    print("Dashboard %-8s %s (%s)" % ("online" if online else "OFFLINE",
-                                      config["dashboard"]["url"], reason))
+    probe = make_probe(config)
+    online, reason = probe.check()
+    print("Target %-8s %s (%s)" % ("online" if online else "OFFLINE",
+                                   probe.url, reason))
     try:
         shelly = make_shelly(config)
         info = shelly.info()
-        print("Shelly    %-8s %s (%s, firmware %s)"
+        print("Shelly %-8s %s (%s, firmware %s)"
               % ("on" if shelly.output() else "off", shelly.host,
                  info.get("model") or info.get("id", "?"),
                  info.get("ver", "?")))
     except ShellyError as err:
-        print("Shelly    ERROR    %s" % err)
+        print("Shelly ERROR    %s" % err)
         return 1
     return 0 if online else 2
 
 
 def command_test(config):
-    print("LCD4Linux dashboard: %s" % config["dashboard"]["url"])
-    online, reason = make_probe(config).check()
+    probe = make_probe(config)
+    print("Target: %s" % probe.url)
+    online, reason = probe.check()
     print("  -> %s (%s)" % ("reachable" if online else "NOT reachable", reason))
     try:
         shelly = make_shelly(config)
@@ -697,8 +843,8 @@ def command_health(config):
     if not os.path.exists(path):
         print("no heartbeat yet: %s" % path)
         return 1
-    interval = config["dashboard"].getfloat("interval", fallback=10.0)
-    timeout = config["dashboard"].getfloat("timeout", fallback=4.0)
+    interval = config["target"].getfloat("interval", fallback=10.0)
+    timeout = config["target"].getfloat("timeout", fallback=4.0)
     limit = max(3 * (interval + timeout), 30.0)
     age = time.time() - os.path.getmtime(path)
     if age > limit:

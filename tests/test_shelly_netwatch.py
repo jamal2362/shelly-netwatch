@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Tests for the watcher.
 
-Everything runs against small HTTP servers on localhost, so the suite needs
-neither a Shelly nor a running LCD4Linux:
+Everything runs against small servers on localhost, so the suite needs
+neither a Shelly nor a watched service of its own:
 
     python3 -m unittest discover -s tests -v
 """
@@ -21,9 +21,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import lcd4linux_shelly as app  # noqa: E402
-
-DEFAULT_URL = app.DEFAULTS["dashboard"]["url"]
+import shelly_netwatch as app  # noqa: E402
 
 
 def configparser_defaults():
@@ -72,7 +70,7 @@ def quiet(handler_class):
 
 
 @quiet
-class DashboardHandler(BaseHTTPRequestHandler):
+class TargetHandler(BaseHTTPRequestHandler):
     status = 200
     body = b'{"active": "default.json", "live": true}'
 
@@ -81,7 +79,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(self.body)))
         if self.status == 401:
-            self.send_header("WWW-Authenticate", 'Basic realm="LCD4Linux"')
+            self.send_header("WWW-Authenticate", 'Basic realm="watched"')
         self.end_headers()
         self.wfile.write(self.body)
 
@@ -192,29 +190,29 @@ class FakeProbe(object):
 
 
 # ---------------------------------------------------------------------------
-# dashboard probe
+# the probes
 # ---------------------------------------------------------------------------
 
-class ProbeTest(unittest.TestCase):
+class HttpProbeTest(unittest.TestCase):
     def setUp(self):
-        DashboardHandler.status = 200
-        self.server = Server(DashboardHandler)
+        TargetHandler.status = 200
+        self.server = Server(TargetHandler)
         self.addCleanup(self.server.close)
 
     def test_online(self):
-        probe = app.Probe(self.server.url + "/api/state", timeout=2)
+        probe = app.HttpProbe(self.server.url + "/api/state", timeout=2)
         online, reason = probe.check()
         self.assertTrue(online)
         self.assertEqual("HTTP 200", reason)
 
-    def test_password_protected_dashboard_counts_as_online(self):
-        DashboardHandler.status = 401
-        probe = app.Probe(self.server.url + "/api/state", timeout=2)
+    def test_password_protected_target_counts_as_online(self):
+        TargetHandler.status = 401
+        probe = app.HttpProbe(self.server.url + "/api/state", timeout=2)
         self.assertTrue(probe.check()[0])
 
     def test_unexpected_status_is_offline(self):
-        DashboardHandler.status = 503
-        probe = app.Probe(self.server.url + "/api/state", timeout=2)
+        TargetHandler.status = 503
+        probe = app.HttpProbe(self.server.url + "/api/state", timeout=2)
         online, reason = probe.check()
         self.assertFalse(online)
         self.assertEqual("HTTP 503", reason)
@@ -222,19 +220,82 @@ class ProbeTest(unittest.TestCase):
     def test_closed_port_is_offline(self):
         port = self.server.port
         self.server.close()
-        probe = app.Probe("http://127.0.0.1:%d/api/state" % port, timeout=2)
+        probe = app.HttpProbe("http://127.0.0.1:%d/api/state" % port, timeout=2)
         self.addCleanup(lambda: None)
         self.assertFalse(probe.check()[0])
 
     def test_accept_any(self):
-        DashboardHandler.status = 500
-        probe = app.Probe(self.server.url + "/", timeout=2, accept_status="any")
+        TargetHandler.status = 500
+        probe = app.HttpProbe(self.server.url + "/", timeout=2,
+                              accept_status="any")
         self.assertTrue(probe.check()[0])
 
     def test_accept_status_parsing(self):
-        self.assertEqual({200, 401}, app.Probe._parse_accept("200,401"))
-        self.assertIsNone(app.Probe._parse_accept("any"))
-        self.assertEqual({200}, app.Probe._parse_accept("nonsense"))
+        self.assertEqual({200, 401}, app.HttpProbe._parse_accept("200,401"))
+        self.assertIsNone(app.HttpProbe._parse_accept("any"))
+        self.assertEqual({200}, app.HttpProbe._parse_accept("nonsense"))
+
+
+class TcpProbeTest(unittest.TestCase):
+    """The plain "is anything listening on that port" check."""
+
+    def setUp(self):
+        TargetHandler.status = 200
+        self.server = Server(TargetHandler)
+        self.addCleanup(self.server.close)
+
+    def test_open_port_is_online(self):
+        probe = app.TcpProbe("tcp://127.0.0.1:%d" % self.server.port, timeout=2)
+        online, reason = probe.check()
+        self.assertTrue(online)
+        self.assertIn("open", reason)
+
+    def test_closed_port_is_offline(self):
+        port = self.server.port
+        self.server.close()
+        self.addCleanup(lambda: None)
+        probe = app.TcpProbe("tcp://127.0.0.1:%d" % port, timeout=2)
+        self.assertFalse(probe.check()[0])
+
+    def test_a_bare_host_and_port_needs_no_scheme(self):
+        probe = app.TcpProbe("127.0.0.1:%d" % self.server.port, timeout=2)
+        self.assertTrue(probe.check()[0])
+
+
+class TargetAddressTest(unittest.TestCase):
+    """How a hand-written target address is understood."""
+
+    def test_bare_host_and_port_means_tcp(self):
+        self.assertEqual("tcp://192.168.178.104:8050",
+                         app.normalise_target("192.168.178.104:8050"))
+        self.assertIsInstance(app.make_probe_for("192.168.178.104:8050"),
+                              app.TcpProbe)
+
+    def test_a_path_means_http(self):
+        self.assertEqual("http://box:8050/api/state",
+                         app.normalise_target("box:8050/api/state"))
+        self.assertIsInstance(app.make_probe_for("box:8050/api/state"),
+                              app.HttpProbe)
+
+    def test_a_scheme_is_kept(self):
+        for url in ("http://box:8050/", "https://box/", "tcp://box:22"):
+            self.assertEqual(url, app.normalise_target(url))
+
+    def test_ipv6_brackets(self):
+        self.assertEqual(("fd00::1", 8050),
+                         app.split_host_port("[fd00::1]:8050"))
+
+    def test_an_empty_target_is_rejected(self):
+        with self.assertRaises(SystemExit):
+            app.normalise_target("")
+
+    def test_a_host_without_a_port_is_rejected(self):
+        with self.assertRaises(SystemExit):
+            app.normalise_target("192.168.178.104")
+
+    def test_an_unknown_scheme_is_rejected(self):
+        with self.assertRaises(SystemExit):
+            app.make_probe_for("ftp://box:21")
 
 
 # ---------------------------------------------------------------------------
@@ -304,7 +365,7 @@ class DigestTest(unittest.TestCase):
         self.assertEqual("SHA-256", fields["algorithm"])
 
     def test_parse_challenge_ignores_basic(self):
-        self.assertIsNone(app.parse_challenge('Basic realm="LCD4Linux"'))
+        self.assertIsNone(app.parse_challenge('Basic realm="watched"'))
 
     def test_header_uses_the_shelly_ha2(self):
         challenge = {"realm": "r", "nonce": "n", "algorithm": "SHA-256"}
@@ -333,13 +394,13 @@ class WatcherTest(unittest.TestCase):
         options.update(kwargs)
         return app.Watcher(FakeProbe(answers), plug, **options), plug
 
-    def test_switches_on_when_the_dashboard_appears(self):
+    def test_switches_on_when_the_target_appears(self):
         watcher, plug = self.watcher([True])
         watcher.step()
         self.assertEqual([True], plug.switches)
         self.assertTrue(watcher.state)
 
-    def test_stays_on_while_the_dashboard_is_there(self):
+    def test_stays_on_while_the_target_is_there(self):
         watcher, plug = self.watcher([True, True, True])
         for _ in range(3):
             watcher.step()
@@ -429,20 +490,43 @@ class ConfigTest(unittest.TestCase):
     def test_defaults_are_complete(self):
         config = app.load_config(self.empty_config())
         self.assertEqual("0", config["shelly"]["channel"])
-        self.assertEqual("3", config["dashboard"]["offline_after"])
+        self.assertEqual("3", config["target"]["offline_after"])
+
+    def test_no_target_is_configured_by_default(self):
+        config = app.load_config(self.empty_config())
+        self.assertEqual("", config["target"]["url"])
+        with self.assertRaises(SystemExit):
+            app.make_probe(config)
 
     def test_command_line_wins(self):
-        args = app.parse_args(["-d", "http://box:8050/", "-s", "10.0.0.5",
+        args = app.parse_args(["-t", "http://box:8050/", "-s", "10.0.0.5",
                                "--offline-after", "5", "--dry-run"])
         config = app.apply_overrides(app.load_config(self.empty_config()), args)
-        self.assertEqual("http://box:8050/", config["dashboard"]["url"])
+        self.assertEqual("http://box:8050/", config["target"]["url"])
         self.assertEqual("10.0.0.5", config["shelly"]["host"])
-        self.assertEqual("5", config["dashboard"]["offline_after"])
+        self.assertEqual("5", config["target"]["offline_after"])
         self.assertTrue(app.as_bool(config["behaviour"]["dry_run"]))
+
+    def test_the_old_option_names_still_work(self):
+        args = app.parse_args(["-d", "http://box:8050/",
+                               "--dashboard-password", "geheim"])
+        config = app.apply_overrides(app.load_config(self.empty_config()), args)
+        self.assertEqual("http://box:8050/", config["target"]["url"])
+        self.assertEqual("geheim", config["target"]["password"])
+
+    def test_an_old_dashboard_section_is_read_as_target(self):
+        handle = tempfile.NamedTemporaryFile("w", suffix=".ini", delete=False)
+        handle.write("[dashboard]\nurl = http://box:8050/\noffline_after = 9\n")
+        handle.close()
+        self.addCleanup(os.unlink, handle.name)
+        config = app.load_config(handle.name)
+        self.assertFalse(config.has_section("dashboard"))
+        self.assertEqual("http://box:8050/", config["target"]["url"])
+        self.assertEqual("9", config["target"]["offline_after"])
 
     def test_example_file_parses(self):
         here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        example = os.path.join(here, "lcd4linux-shelly.example.ini")
+        example = os.path.join(here, "shelly-netwatch.example.ini")
         config = app.load_config(example)
         watcher = app.make_watcher(config)
         self.assertEqual(3, watcher.offline_after)
@@ -476,8 +560,8 @@ class EnvironmentTest(unittest.TestCase):
 
     def test_every_section_can_be_set(self):
         config = self.config_from({
-            "DASHBOARD_URL": "http://box:8050/api/state",
-            "DASHBOARD_OFFLINE_AFTER": "7",
+            "TARGET_URL": "http://box:8050/api/state",
+            "TARGET_OFFLINE_AFTER": "7",
             "SHELLY_HOST": "10.0.0.5",
             "SHELLY_CHANNEL": "1",
             "RESYNC_INTERVAL": "0",
@@ -500,8 +584,21 @@ class EnvironmentTest(unittest.TestCase):
 
     def test_prefixed_name_wins(self):
         config = self.config_from({"SHELLY_HOST": "bare",
-                                   "L4LS_SHELLY_HOST": "prefixed"})
+                                   "SNW_SHELLY_HOST": "prefixed"})
         self.assertEqual("prefixed", config["shelly"]["host"])
+
+    def test_the_old_environment_names_still_work(self):
+        config = self.config_from({"DASHBOARD_URL": "http://box:8050/",
+                                   "DASHBOARD_OFFLINE_AFTER": "7",
+                                   "L4LS_SHELLY_HOST": "10.0.0.5"})
+        self.assertEqual("http://box:8050/", config["target"]["url"])
+        self.assertEqual("7", config["target"]["offline_after"])
+        self.assertEqual("10.0.0.5", config["shelly"]["host"])
+
+    def test_the_new_name_beats_the_old_one(self):
+        config = self.config_from({"TARGET_URL": "http://neu:8050/",
+                                   "DASHBOARD_URL": "http://alt:8050/"})
+        self.assertEqual("http://neu:8050/", config["target"]["url"])
 
     def test_value_from_a_file(self):
         handle = tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False)
@@ -541,7 +638,8 @@ class EnvironmentTest(unittest.TestCase):
 
     def test_empty_environment_changes_nothing(self):
         config = self.config_from({})
-        self.assertEqual(DEFAULT_URL, config["dashboard"]["url"])
+        self.assertEqual(app.DEFAULTS["target"]["url"], config["target"]["url"])
+        self.assertEqual("admin", config["shelly"]["username"])
 
 
 # ---------------------------------------------------------------------------

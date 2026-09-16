@@ -65,18 +65,18 @@ jobs:
         with:
           context: .
           platforms: ${{ inputs.platform }}
-          tags: lcd4linux-shelly:${{ inputs.tag }}
-          outputs: type=docker,dest=/tmp/lcd4linux-shelly-${{ steps.arch.outputs.name }}.tar
+          tags: shelly-netwatch:${{ inputs.tag }}
+          outputs: type=docker,dest=/tmp/shelly-netwatch-${{ steps.arch.outputs.name }}.tar
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       - name: Groesse anzeigen
-        run: ls -lh /tmp/lcd4linux-shelly-${{ steps.arch.outputs.name }}.tar
+        run: ls -lh /tmp/shelly-netwatch-${{ steps.arch.outputs.name }}.tar
 
       - name: Archiv als Artefakt anhaengen
         uses: actions/upload-artifact@v4
         with:
-          name: lcd4linux-shelly-${{ steps.arch.outputs.name }}
-          path: /tmp/lcd4linux-shelly-${{ steps.arch.outputs.name }}.tar
+          name: shelly-netwatch-${{ steps.arch.outputs.name }}
+          path: /tmp/shelly-netwatch-${{ steps.arch.outputs.name }}.tar
           retention-days: 30
           if-no-files-found: error
