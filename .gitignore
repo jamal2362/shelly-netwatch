@@ -1,4 +1,4 @@
 __pycache__/
 *.py[cod]
-lcd4linux-shelly.ini
+shelly-netwatch.ini
 *.log

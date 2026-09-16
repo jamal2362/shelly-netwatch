@@ -1,157 +1,191 @@
-# LCD4Linux_Shelly
+# shelly-netwatch
 
-Schaltet eine **Shelly Plug M Gen3** (oder jede andere Shelly der Generation 2/3)
-im Takt des **LCD4Linux-Webdashboards**:
+Switch a **Shelly (Gen2/Gen3)** by whether something on the network answers.
 
-* Dashboard auf `http://192.168.178.104:8050/` erreichbar → **Steckdose an**
-* Dashboard weg → **Steckdose aus**
+```
+target reachable  →  socket on
+target gone       →  socket off
+```
 
-Gedacht als Begleiter zum Kodi-Add-on
-[`script.lcd4linux`](https://github.com/CE-Repo/script.lcd4linux), damit das
-angeschlossene Display nur dann 230 V bekommt, wenn das Dashboard auch läuft.
+The target is anything that answers on an **IP and a port** – a web dashboard,
+a media player, a printer, a PC, an access point, a game server, a NAS. Either
+as an HTTP poll (`http://192.168.178.104:8050/api/state`) or as a plain TCP
+check (`192.168.178.104:8050` – "is anything listening there at all?").
 
-Ein einziges Python-Skript, **nur Standardbibliothek** – kein `pip`, kein
-`requests`, kein Compiler. Läuft ab Python 3.7 auf CoreELEC, Raspberry Pi,
-NAS, Router oder einem beliebigen Linux-Rechner im selben Netz – oder
-**als Docker-Container, vollständig über Umgebungsvariablen konfiguriert**.
+One Python script, **standard library only** – no `pip`, no `requests`, no
+compiler. Runs on Python 3.7 and up on CoreELEC, a Raspberry Pi, a NAS, a
+router or any other Linux box on the same network, or as a Docker container
+configured entirely through environment variables.
 
 ---
 
-## ⚠️ Vorher lesen
+## Contents
 
-Die Steckdose darf **nicht die Box versorgen, auf der LCD4Linux läuft**.
-Sonst schaltet das Skript beim ersten Aussetzer den Strom ab, das Dashboard
-kommt nie wieder online, und die Steckdose bleibt für immer aus. Die Shelly
-gehört an das Display, den Monitor, die Beleuchtung – an alles, was *vom*
-Dashboard abhängt, nicht an das, was es *trägt*.
+* [Read this first](#read-this-first)
+* [What it is good for](#what-it-is-good-for)
+* [Quick start](#quick-start)
+* [Docker](#docker)
+* [Installation without Docker](#installation-without-docker)
+* [How it works](#how-it-works)
+* [Commands](#commands)
+* [Configuration](#configuration)
+* [Troubleshooting](#troubleshooting)
+* [Tests](#tests)
+* [License](#license)
+
+---
+
+## Read this first
+
+> ⚠️ **The socket must not power the box the target runs on.**
+>
+> Otherwise the script cuts the power at the first hiccup, the target never
+> comes back online, and the socket stays off forever. The Shelly belongs on
+> whatever depends *on* the target – display, monitor, lighting, speakers –
+> never on what *carries* it.
+
+---
+
+## What it is good for
+
+Anything where a socket should follow a service instead of a timer.
+
+| Target | Address | What the Shelly switches |
+|---|---|---|
+| A media box's web interface | `http://192.168.178.104:8050/api/state` | the attached display |
+| A media player's RPC port | `192.168.178.104:8080` | amplifier, soundbar |
+| A PC or workstation | `192.168.178.20:3389` | monitor, desk lamp |
+| A 3D printer (OctoPrint) | `http://octopi/` | fume extraction, enclosure light |
+| An access point | `192.168.178.1:443` | repeater, status lamp |
+| A NAS | `192.168.178.10:445` | external drive bay |
+
+---
+
+## Quick start
+
+```bash
+# watch an HTTP endpoint, switch the Shelly at 192.168.178.60
+shelly_netwatch.py -t http://192.168.178.104:8050/api/state -s 192.168.178.60
+
+# watch a bare port instead
+shelly_netwatch.py -t 192.168.178.104:8050 -s 192.168.178.60
+
+# see what both sides say, without switching anything
+shelly_netwatch.py -t 192.168.178.104:8050 -s 192.168.178.60 status
+```
+
+Nothing is switched until the state actually changes, and `-n` keeps it from
+switching at all while you watch the log.
 
 ---
 
 ## Docker
 
-Das Image braucht keine Zustandsdaten, kein Volume und keine
-Konfigurationsdatei – **alles wird über Umgebungsvariablen gesetzt**. Es
-genügt Bridge-Netzwerk und es werden keine Ports veröffentlicht; der
-Container baut nur ausgehende Verbindungen ins LAN auf, zum Dashboard und
-zur Steckdose.
+The image keeps no state, needs no volume and no configuration file –
+**everything is set through environment variables**. Bridge networking is
+enough and no ports are published; the container only makes outgoing
+connections into the LAN, to the target and to the socket.
 
-### Image bauen lassen und auf der NAS importieren
-
-Der empfohlene Weg für die UGREEN NAS: GitHub baut das Image, die
-Docker-App importiert die fertige Datei. Keine Registry, kein Anmelden,
-kein Compiler auf der NAS.
-
-**1. Bauen lassen.** Im Repository auf *Actions* → Workflow
-*Tests und Image* → **Run workflow**. Zwei Felder stehen zur Wahl:
-
-| Feld | Für die DXP2800 |
-|---|---|
-| `platform` | `linux/amd64` – die DXP2800 hat einen Intel N100 |
-| `tag` | `latest`, sofern nichts anderes gewünscht ist |
-
-Erst laufen die Tests, dann wird gebaut; zusammen dauert das gut eine
-Minute.
-
-> Den Knopf *Run workflow* zeigt GitHub nur für Workflows an, die auf dem
-> Standardbranch liegen. Solange die Datei nur in einem Feature-Branch
-> steht, muss dieser erst nach `main` gebracht werden.
-
-**2. Herunterladen.** Unten auf der Seite des Laufs hängt unter *Artifacts*
-das Paket `lcd4linux-shelly-amd64`. GitHub packt Artefakte immer in ein
-ZIP – dieses **entpacken**, herauskommt `lcd4linux-shelly-amd64.tar`
-(rund 20 MB). Genau diese `.tar` will die Docker-App, nicht das ZIP.
-
-**3. Auf die NAS legen.** Die Datei in eine Freigabe kopieren, zum Beispiel
-über den Dateimanager von UGOS nach `/volume1/docker/`.
-
-**4. Importieren.** Docker-App → **Image** → **`+`** → **Von NAS** → die
-`.tar` auswählen. Danach steht `lcd4linux-shelly:latest` in der Liste.
-(*Von Paketquelle* daneben lädt aus einer Registry – das wird hier nicht
-gebraucht.)
-
-**5. Container anlegen.** Aus dem importierten Image einen Container
-erstellen und dabei setzen:
-
-* Neustartverhalten: **immer neu starten**
-* Netzwerk: **Bridge** (Standard), keine Portweiterleitung nötig
-* Umgebungsvariablen – mindestens diese drei:
-
-| Variable | Wert |
-|---|---|
-| `TZ` | `Europe/Berlin` |
-| `DASHBOARD_URL` | `http://192.168.178.104:8050/api/state` |
-| `SHELLY_HOST` | die IP der Shelly Plug M Gen3, z. B. `192.168.178.60` |
-
-Alles Weitere ist optional und steht in der Tabelle unter
-[Konfiguration](#konfiguration). Zum Ausprobieren lohnt ein erster Start
-mit `COMMAND=test`: der Container schreibt dann ins Protokoll, ob er
-Dashboard und Steckdose erreicht, und beendet sich wieder. Läuft das
-durch, die Variable wieder entfernen (oder auf `watch` setzen) und den
-Container dauerhaft starten.
-
-Ein Update läuft genauso: Workflow starten, neue `.tar` importieren,
-Container neu erstellen.
-
-### Alternativ: über SSH
-
-Wer lieber auf der Kommandozeile arbeitet, baut das Image direkt auf der
-NAS – es gibt keine kompilierten Abhängigkeiten, das dauert auch auf dem
-N100 nur Sekunden:
+### Compose
 
 ```bash
-ssh <benutzer>@<nas-ip>
-sudo mkdir -p /volume1/docker/lcd4linux-shelly
-cd /volume1/docker/lcd4linux-shelly
-sudo git clone https://github.com/CE-Repo/LCD4Linux_Shelly.git .
-sudo nano docker-compose.yml     # DASHBOARD_URL und SHELLY_HOST eintragen
-sudo docker compose up -d --build
-sudo docker compose logs -f
+git clone https://github.com/jamal2362/shelly-netwatch.git
+cd shelly-netwatch
+nano docker-compose.yml          # fill in TARGET_URL and SHELLY_HOST
+docker compose up -d --build
+docker compose logs -f
 ```
 
-Die mitgelieferte `docker-compose.yml` listet alle Variablen mit Kommentar
-auf. Vor dem Dauerbetrieb lohnt ein Blick, ob der Container beide Seiten
-erreicht:
+The bundled `docker-compose.yml` lists every variable with a comment. Before
+running it permanently, check that the container reaches both sides:
 
 ```bash
-sudo docker compose run --rm lcd4linux-shelly test
+docker compose run --rm shelly-netwatch test
 ```
 
-Ein Archiv aus dem Actions-Workflow lässt sich auf demselben Weg
-einspielen, ohne zu bauen:
+### Plain docker run
 
 ```bash
-sudo docker load -i lcd4linux-shelly-amd64.tar
-```
-
-Und ohne Compose, wenn das Image schon da ist:
-
-```bash
-docker run -d --name lcd4linux-shelly --restart unless-stopped \
+docker run -d --name shelly-netwatch --restart unless-stopped \
     -e TZ=Europe/Berlin \
-    -e DASHBOARD_URL=http://192.168.178.104:8050/api/state \
+    -e TARGET_URL=http://192.168.178.104:8050/api/state \
     -e SHELLY_HOST=192.168.178.60 \
-    lcd4linux-shelly:latest
+    shelly-netwatch:latest
 ```
 
-Der Container läuft als Benutzer `shelly` (UID 1000), nicht als root, und
-beendet sich auf `docker stop` innerhalb einer Sekunde sauber.
+The container runs as user `shelly` (UID 1000), not as root, and shuts down
+cleanly within a second on `docker stop`.
 
-### Healthcheck
+### Have GitHub build the image (for a NAS without a build toolchain)
 
-Der Watcher berührt nach jeder Abfrage eine Heartbeat-Datei; der eingebaute
-Healthcheck prüft, ob diese frisch ist. **Gesund heißt: der Watcher arbeitet** –
-nicht: das Dashboard ist online. Ein ausgeschaltetes Kodi ist ein gültiges
-Ergebnis und kein Fehler, der Container bleibt dabei `healthy`.
+Useful on a UGREEN NAS and similar appliances: GitHub builds the image, the
+Docker app imports the finished file. No registry, no login, no compiler on
+the NAS.
+
+**1. Build it.** In the repository go to *Actions* → workflow *Tests and
+image* → **Run workflow**. Two fields to choose:
+
+| Field | For an Intel N100 box (e.g. DXP2800) |
+|---|---|
+| `platform` | `linux/amd64` |
+| `tag` | `latest`, unless you want something else |
+
+Tests run first, then the build; together that takes about a minute.
+
+> GitHub only shows the *Run workflow* button for workflows that live on the
+> default branch. As long as the file only exists in a feature branch, that
+> branch has to reach the default branch first.
+
+**2. Download it.** At the bottom of the run's page, under *Artifacts*, sits
+the package `shelly-netwatch-amd64`. GitHub always wraps artifacts in a ZIP –
+**unpack it**, and out comes `shelly-netwatch-amd64.tar` (about 20 MB). That
+`.tar` is what the Docker app wants, not the ZIP.
+
+**3. Put it on the NAS.** Copy the file into a share, for example to
+`/volume1/docker/`.
+
+**4. Import it.** Docker app → **Image** → **`+`** → **From NAS** → pick the
+`.tar`. Afterwards `shelly-netwatch:latest` is in the list.
+
+**5. Create the container** from that image and set:
+
+* restart behaviour: **always restart**
+* network: **bridge** (the default), no port forwarding needed
+* environment variables – at least these three:
+
+| Variable | Value |
+|---|---|
+| `TZ` | e.g. `Europe/Berlin` |
+| `TARGET_URL` | the target's address, e.g. `http://192.168.178.104:8050/api/state` or `192.168.178.104:8050` |
+| `SHELLY_HOST` | the Shelly's IP, e.g. `192.168.178.60` |
+
+Everything else is optional and listed under [Configuration](#configuration).
+For a first try set `COMMAND=test`: the container then logs whether it reaches
+the target and the socket, and exits again. Once that works, remove the
+variable (or set it to `watch`) and start the container for good.
+
+Updating works the same way: run the workflow, import the new `.tar`, recreate
+the container. Loading the archive from a shell works too:
 
 ```bash
-docker inspect -f '{{.State.Health.Status}}' lcd4linux-shelly
+docker load -i shelly-netwatch-amd64.tar
 ```
 
-### Passwörter
+### Health check
 
-Wer das Shelly- oder Dashboard-Passwort nicht im Klartext in der
-Compose-Datei stehen haben will, legt es in eine Datei und verweist mit
-`…_FILE` darauf:
+The watcher touches a heartbeat file after every poll; the built-in health
+check tests whether that file is fresh. **Healthy means: the watcher is
+working** – not: the target is online. A switched-off target is a valid
+result, not an error, and the container stays `healthy` through it.
+
+```bash
+docker inspect -f '{{.State.Health.Status}}' shelly-netwatch
+```
+
+### Passwords
+
+To keep a password out of the Compose file, put it in a file and point at it
+with `…_FILE`:
 
 ```yaml
     environment:
@@ -164,248 +198,261 @@ secrets:
     file: ./shelly_password.txt
 ```
 
-Das gilt für jede Variable aus der Tabelle weiter unten: zu jedem Namen
-existiert eine `…_FILE`-Variante, die Vorrang hat.
+This works for every variable in the table below: each name has a `…_FILE`
+variant, and that variant wins. The value does not show up in
+`docker inspect` either.
 
 ---
 
-## Installation ohne Docker
+## Installation without Docker
 
 ```bash
-git clone https://github.com/CE-Repo/LCD4Linux_Shelly.git
-cd LCD4Linux_Shelly
+git clone https://github.com/jamal2362/shelly-netwatch.git
+cd shelly-netwatch
 
-# Konfiguration anlegen und die beiden Adressen eintragen
-sudo cp lcd4linux-shelly.example.ini /etc/lcd4linux-shelly.ini
-sudo nano /etc/lcd4linux-shelly.ini
+# create the configuration and fill in the two addresses
+sudo cp shelly-netwatch.example.ini /etc/shelly-netwatch.ini
+sudo nano /etc/shelly-netwatch.ini
 
-# Skript ablegen
-sudo install -m 755 lcd4linux_shelly.py /usr/local/bin/lcd4linux_shelly.py
+# install the script
+sudo install -m 755 shelly_netwatch.py /usr/local/bin/shelly_netwatch.py
 ```
 
-Anzupassen sind genau zwei Zeilen:
+Exactly two lines need changing:
 
 ```ini
-[dashboard]
+[target]
 url  = http://192.168.178.104:8050/api/state
 
 [shelly]
-host = 192.168.178.60          # die IP der Shelly Plug M Gen3
+host = 192.168.178.60          # the Shelly's IP
 ```
 
-Die IP der Shelly steht in der Shelly-App unter *Einstellungen → Gerätedaten*
-oder im Router. Eine feste IP (DHCP-Reservierung) ist zu empfehlen.
+The Shelly's IP is in the Shelly app under *Settings → Device information*, or
+in the router. A fixed IP (DHCP reservation) is recommended.
 
-### Erst einmal ausprobieren
+### Try it first
 
 ```bash
-lcd4linux_shelly.py test        # erreicht das Skript beide Seiten?
-lcd4linux_shelly.py status      # was sagen Dashboard und Steckdose gerade?
-lcd4linux_shelly.py once -v     # eine Abfrage, einmal schalten
-lcd4linux_shelly.py watch -v -n # zuschauen, ohne wirklich zu schalten
+shelly_netwatch.py test        # does the script reach both sides?
+shelly_netwatch.py status      # what do the target and the socket say right now?
+shelly_netwatch.py once -v     # one poll, switch once
+shelly_netwatch.py watch -v -n # watch along without actually switching
 ```
 
-`test` meldet Modell, MAC und Firmware der Shelly – wenn das durchläuft,
-stimmen Adresse und Passwort.
+`test` reports the Shelly's model, MAC and firmware – if that goes through,
+address and password are right.
 
-### Als Dienst (systemd)
+### As a service (systemd)
 
 ```bash
-sudo cp systemd/lcd4linux-shelly.service /etc/systemd/system/
+sudo cp systemd/shelly-netwatch.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now lcd4linux-shelly
-journalctl -u lcd4linux-shelly -f
+sudo systemctl enable --now shelly-netwatch
+journalctl -u shelly-netwatch -f
 ```
 
-### Auf CoreELEC / LibreELEC
+### On CoreELEC / LibreELEC
 
-Dort gibt es kein `/usr/local/bin` und kein normales systemd-Verzeichnis;
-beides liegt unter `/storage`:
+There is no `/usr/local/bin` and no normal systemd directory there; both live
+under `/storage`:
 
 ```bash
-mkdir -p /storage/lcd4linux-shelly
-cp lcd4linux_shelly.py lcd4linux-shelly.example.ini /storage/lcd4linux-shelly/
-mv /storage/lcd4linux-shelly/lcd4linux-shelly.example.ini \
-   /storage/lcd4linux-shelly/lcd4linux-shelly.ini
-chmod +x /storage/lcd4linux-shelly/lcd4linux_shelly.py
+mkdir -p /storage/shelly-netwatch
+cp shelly_netwatch.py shelly-netwatch.example.ini /storage/shelly-netwatch/
+mv /storage/shelly-netwatch/shelly-netwatch.example.ini \
+   /storage/shelly-netwatch/shelly-netwatch.ini
+chmod +x /storage/shelly-netwatch/shelly_netwatch.py
 
-cp systemd/lcd4linux-shelly.service /storage/.config/system.d/
-nano /storage/.config/system.d/lcd4linux-shelly.service   # Pfade anpassen,
-                                                          # DynamicUser entfernen
+cp systemd/shelly-netwatch.service /storage/.config/system.d/
+nano /storage/.config/system.d/shelly-netwatch.service   # adjust the paths,
+                                                         # drop DynamicUser
 systemctl daemon-reload
-systemctl enable --now lcd4linux-shelly
+systemctl enable --now shelly-netwatch
 ```
 
-Läuft das Skript auf derselben Box wie Kodi, genügt als Dashboard-Adresse
-`http://127.0.0.1:8050/api/state`.
+If the script runs on the same box as the target, `http://127.0.0.1:8050/api/state`
+is address enough.
 
 ---
 
-## Wie es arbeitet
+## How it works
 
-Das Skript fragt alle 10 Sekunden `http://<box>:8050/api/state` ab – den
-kleinsten Endpunkt des Dashboards, ein paar hundert Byte JSON statt der
-ganzen Seite. Aus der Antwort wird ein Zustand:
+The script polls the target every 10 seconds. How it polls is decided by the
+address:
 
-| Antwort | Bewertung |
+| `url` | Check |
+|---|---|
+| `http://box:8050/api/state` | HTTP GET, the status code counts |
+| `https://box/` | the same over TLS |
+| `box:8050` (no scheme, no path) | **TCP**: connect to the port, nothing more |
+| `tcp://box:8050` | the same, spelled out |
+| `box:8050/api/state` | a path is present → HTTP |
+
+The TCP check is the smallest possible test and works for everything that
+speaks no HTTP – SSH, SMB, printers, game servers. For HTTP, pick the cheapest
+endpoint the service offers: a few hundred bytes of JSON beat a full page
+every ten seconds.
+
+The answer becomes a state:
+
+| Answer | Verdict |
 |---|---|
 | HTTP 200 | online |
-| HTTP 401 (Web-Editor mit Passwort) | online – der Server antwortet ja |
-| Verbindung abgelehnt, Timeout, DNS-Fehler | offline |
+| HTTP 401 (password protected) | online – the server is answering, after all |
+| TCP connection succeeds | online |
+| connection refused, timeout, DNS error | offline |
 | HTTP 5xx | offline |
 
-Geschaltet wird erst, wenn sich der Zustand **wirklich** geändert hat:
+Switching only happens once the state has **really** changed:
 
-* **einschalten** nach `online_after` guten Abfragen (Standard 1 – sofort),
-* **ausschalten** nach `offline_after` fehlgeschlagenen Abfragen
-  (Standard 3, also nach ~30 s).
+* **on** after `online_after` good polls (default 1 – immediately),
+* **off** after `offline_after` failed polls (default 3, so after ~30 s).
 
-Damit übersteht die Steckdose einen Neustart des Add-ons, ein kurz
-überlastetes WLAN oder einen Kodi-Skin-Reload, ohne zu klackern. Solange sich
-nichts ändert, geht auch kein Befehl an die Shelly.
+That way the socket survives a service restart, a briefly congested Wi-Fi or a
+reload without clacking. As long as nothing changes, no command goes to the
+Shelly either.
 
-Alle 5 Minuten (`resync_interval`) wird zusätzlich geprüft, ob die Steckdose
-noch so steht, wie sie soll – falls jemand sie über die App oder den Taster
-umgelegt hat, wird sie zurückgestellt. Wer manuelles Schalten behalten
-möchte, setzt `resync_interval = 0`.
+Every 5 minutes (`resync_interval`) the script additionally checks whether the
+socket is still where it should be – if somebody flipped it through the app or
+the button, it is put back. To keep manual switching, set `resync_interval = 0`.
 
-Beim Start ist der Zustand unbekannt; die erste eindeutige Abfrage bringt die
-Steckdose in die richtige Stellung. Beim Beenden bleibt sie unangetastet
-(`on_exit = keep`), lässt sich aber auf `off` oder `on` stellen.
+At startup the state is unknown; the first clear poll puts the socket in the
+right position. On shutdown it is left alone (`on_exit = keep`), but can be set
+to `off` or `on`.
 
-### Ansteuerung der Shelly
+### Talking to the Shelly
 
-Gen2/Gen3-Geräte sprechen JSON-RPC über `POST /rpc`:
+Gen2/Gen3 devices speak JSON-RPC over `POST /rpc`:
 
 ```
-Switch.Set        {"id": 0, "on": true}    schaltet
-Switch.GetStatus  {"id": 0}                liest den Zustand zurück
-Shelly.GetDeviceInfo                       Modell, MAC, Firmware
+Switch.Set        {"id": 0, "on": true}    switches
+Switch.GetStatus  {"id": 0}                reads the state back
+Shelly.GetDeviceInfo                       model, MAC, firmware
 ```
 
-Ist im Gerät unter *Einstellungen → Authentifizierung* ein Passwort gesetzt,
-verwendet das Skript HTTP-Digest mit SHA-256. Der Benutzername ist bei
-Shelly immer `admin`; einzutragen ist nur `shelly.password`. Shelly weicht
-beim Digest-Verfahren vom RFC ab (HA2 ist die feste Zeichenkette
-`dummy_method:dummy_uri`) – das Skript beherrscht beide Varianten und
-probiert sie nacheinander.
+If a password is set on the device under *Settings → Authentication*, the
+script uses HTTP digest with SHA-256. The username on a Shelly is always
+`admin`; only `shelly.password` needs filling in. Shelly deviates from the RFC
+in its digest scheme (HA2 is the fixed string `dummy_method:dummy_uri`) – the
+script knows both variants and tries them in turn.
 
-Fehlgeschlagene Schaltbefehle werden bis zu `retries`-mal mit wachsender
-Pause wiederholt; klappt es trotzdem nicht, landet eine Zeile im Log und die
-nächste Abfrage versucht es erneut. Der Watcher bleibt in jedem Fall am Leben.
+Failed switch commands are retried up to `retries` times with a growing pause;
+if it still does not work, a line lands in the log and the next poll tries
+again. The watcher stays alive either way.
+
+Gen1 devices are not supported: they speak `/relay/0?turn=on` instead of RPC.
 
 ---
 
-## Befehle
+## Commands
 
 ```
-lcd4linux_shelly.py [Optionen] [watch|once|status|on|off|test|health]
+shelly_netwatch.py [options] [watch|once|status|on|off|test|health]
 ```
 
-| Befehl | Wirkung |
+| Command | Effect |
 |---|---|
-| `watch` | Dauerbetrieb, Standard |
-| `once` | eine Abfrage, gegebenenfalls schalten, fertig – für `cron` |
-| `status` | eine Zeile pro Seite; Rückgabewert 0 = online, 2 = offline |
-| `on` / `off` | Steckdose von Hand schalten |
-| `test` | Verbindungstest mit Gerätedaten |
-| `health` | Healthcheck des Containers, siehe oben |
+| `watch` | keep polling, the default |
+| `once` | one poll, switch if needed, done – for `cron` |
+| `status` | one line per side; exit code 0 = online, 2 = offline |
+| `on` / `off` | switch the socket by hand |
+| `test` | connection test with device information |
+| `health` | the container health check, see above |
 
-Im Container wird der Befehl über `COMMAND` gewählt, etwa `COMMAND=test`.
+In the container the command is chosen through `COMMAND`, e.g. `COMMAND=test`.
 
-Für `cron` statt eines Dienstes:
+For `cron` instead of a service:
 
 ```cron
-* * * * * /usr/local/bin/lcd4linux_shelly.py once >> /var/log/lcd4linux-shelly.log 2>&1
+* * * * * /usr/local/bin/shelly_netwatch.py once >> /var/log/shelly-netwatch.log 2>&1
 ```
 
-Da `once` den vorherigen Zustand nicht kennt, schaltet es bei jedem Lauf
-einmal – für den Dauerbetrieb ist `watch` die bessere Wahl.
+Since `once` does not know the previous state, it switches on every run – for
+continuous operation `watch` is the better choice.
 
 ---
 
-## Konfiguration
+## Configuration
 
-Jede Einstellung lässt sich auf drei Wegen setzen. Wer gewinnt, steht weiter
-unten; eingebaute Vorgaben < INI-Datei < **Umgebung** < Kommandozeile.
+Every setting can be given in three ways. Built-in defaults < INI file <
+**environment** < command line.
 
-| Umgebungsvariable | INI | Kommandozeile | Standard | Bedeutung |
+| Environment variable | INI | Command line | Default | Meaning |
 |---|---|---|---|---|
-| `DASHBOARD_URL` | `dashboard.url` | `-d`, `--dashboard-url` | `http://192.168.178.104:8050/api/state` | Adresse des Dashboards |
-| `DASHBOARD_INTERVAL` | `dashboard.interval` | `-i`, `--interval` | `10` | Sekunden zwischen zwei Abfragen |
-| `DASHBOARD_TIMEOUT` | `dashboard.timeout` | `--timeout` | `4` | Zeitlimit einer Abfrage |
-| `DASHBOARD_ONLINE_AFTER` | `dashboard.online_after` | `--online-after` | `1` | gute Abfragen bis „an“ |
-| `DASHBOARD_OFFLINE_AFTER` | `dashboard.offline_after` | `--offline-after` | `3` | Fehlversuche bis „aus“ |
-| `DASHBOARD_USERNAME` | `dashboard.username` | – | `lcd4linux` | Benutzername des Web-Editors (beliebig) |
-| `DASHBOARD_PASSWORD` | `dashboard.password` | `--dashboard-password` | – | Passwort des Web-Editors |
-| `DASHBOARD_ACCEPT_STATUS` | `dashboard.accept_status` | – | `200,401` | HTTP-Status, die als online gelten; `any` = jede Antwort |
-| `SHELLY_HOST` | `shelly.host` | `-s`, `--shelly-host` | – | Adresse der Shelly |
-| `SHELLY_CHANNEL` | `shelly.channel` | `--channel` | `0` | Schaltkanal |
-| `SHELLY_USERNAME` | `shelly.username` | – | `admin` | bei Shelly immer `admin` |
-| `SHELLY_PASSWORD` | `shelly.password` | `--shelly-password` | – | Shelly-Passwort |
-| `SHELLY_TIMEOUT` | `shelly.timeout` | – | `5` | Zeitlimit eines Schaltbefehls |
-| `SHELLY_RETRIES` | `shelly.retries` | – | `3` | Wiederholungen bei Fehlern |
-| `RESYNC_INTERVAL` | `behaviour.resync_interval` | `--resync-interval` | `300` | Nachkorrektur, `0` = aus |
-| `ON_EXIT` | `behaviour.on_exit` | `--on-exit` | `keep` | `keep`, `off` oder `on` beim Beenden |
-| `DRY_RUN` | `behaviour.dry_run` | `-n`, `--dry-run` | `false` | nur protokollieren, nichts schalten |
-| `VERBOSE` | `behaviour.verbose` | `-v`, `--verbose` | `false` | jede Abfrage protokollieren |
-| `LOG_FILE` | `behaviour.log_file` | `--log-file` | – | in eine Datei statt nach stdout |
-| `HEARTBEAT_FILE` | `behaviour.heartbeat_file` | `--heartbeat-file` | – | Datei für den Healthcheck (im Image gesetzt) |
-| `COMMAND` | – | Positionsargument | `watch` | welcher Befehl ausgeführt wird |
-| `CONFIG_FILE` | – | `-c`, `--config` | – | Pfad zur INI-Datei |
+| `TARGET_URL` | `target.url` | `-t`, `--target-url` | – | the target's address: URL or `HOST:PORT` |
+| `TARGET_INTERVAL` | `target.interval` | `-i`, `--interval` | `10` | seconds between two polls |
+| `TARGET_TIMEOUT` | `target.timeout` | `--timeout` | `4` | how long a poll may take |
+| `TARGET_ONLINE_AFTER` | `target.online_after` | `--online-after` | `1` | good polls before switching on |
+| `TARGET_OFFLINE_AFTER` | `target.offline_after` | `--offline-after` | `3` | failed polls before switching off |
+| `TARGET_USERNAME` | `target.username` | – | `shelly-netwatch` | username for HTTP basic auth |
+| `TARGET_PASSWORD` | `target.password` | `--target-password` | – | the target's password |
+| `TARGET_ACCEPT_STATUS` | `target.accept_status` | – | `200,401` | HTTP status codes counting as online; `any` = every answer |
+| `SHELLY_HOST` | `shelly.host` | `-s`, `--shelly-host` | – | the Shelly's address |
+| `SHELLY_CHANNEL` | `shelly.channel` | `--channel` | `0` | switch channel |
+| `SHELLY_USERNAME` | `shelly.username` | – | `admin` | always `admin` on a Shelly |
+| `SHELLY_PASSWORD` | `shelly.password` | `--shelly-password` | – | the Shelly's password |
+| `SHELLY_TIMEOUT` | `shelly.timeout` | – | `5` | time limit for a switch command |
+| `SHELLY_RETRIES` | `shelly.retries` | – | `3` | retries on failure |
+| `RESYNC_INTERVAL` | `behaviour.resync_interval` | `--resync-interval` | `300` | correction pass, `0` = off |
+| `ON_EXIT` | `behaviour.on_exit` | `--on-exit` | `keep` | `keep`, `off` or `on` when stopping |
+| `DRY_RUN` | `behaviour.dry_run` | `-n`, `--dry-run` | `false` | only log, never switch |
+| `VERBOSE` | `behaviour.verbose` | `-v`, `--verbose` | `false` | log every poll |
+| `LOG_FILE` | `behaviour.log_file` | `--log-file` | – | into a file instead of stdout |
+| `HEARTBEAT_FILE` | `behaviour.heartbeat_file` | `--heartbeat-file` | – | file for the health check (set in the image) |
+| `COMMAND` | – | positional argument | `watch` | which command runs |
+| `CONFIG_FILE` | – | `-c`, `--config` | – | path to the INI file |
 
-Zwei Dinge gelten für **jeden** dieser Namen:
+Two things hold for **every** one of these names:
 
-* **`…_FILE`** – statt `SHELLY_PASSWORD` kann `SHELLY_PASSWORD_FILE` auf eine
-  Datei zeigen, deren Inhalt der Wert ist. Praktisch für Docker-Secrets, und
-  der Wert taucht nicht in `docker inspect` auf. Die `…_FILE`-Variante hat
-  Vorrang vor dem direkten Wert.
-* **`L4LS_`-Präfix** – `L4LS_SHELLY_HOST` wird genauso gelesen wie
-  `SHELLY_HOST` und geht vor. Nur nötig, wenn ein schlichter Name wie
-  `VERBOSE` außerhalb eines Containers mit etwas anderem kollidiert.
+* **`…_FILE`** – instead of `SHELLY_PASSWORD`, `SHELLY_PASSWORD_FILE` can point
+  at a file whose contents are the value. The `…_FILE` variant wins over the
+  direct value.
+* **`SNW_` prefix** – `SNW_SHELLY_HOST` is read just like `SHELLY_HOST` and
+  takes precedence. Only needed when a plain name like `VERBOSE` collides with
+  something else outside a container.
 
-Eine INI-Datei ist nirgends Pflicht. Ohne `--config` und ohne `CONFIG_FILE`
-sucht das Skript der Reihe nach `./lcd4linux-shelly.ini`,
-`~/.config/lcd4linux-shelly.ini` und `/etc/lcd4linux-shelly.ini`; findet es
-keine, gelten Vorgaben und Umgebung. `lcd4linux-shelly.example.ini` zeigt
-alle Werte in Dateiform.
+An INI file is nowhere mandatory. Without `--config` and without
+`CONFIG_FILE`, the script looks for `./shelly-netwatch.ini`,
+`~/.config/shelly-netwatch.ini` and `/etc/shelly-netwatch.ini` in that order;
+if it finds none, defaults and the environment apply.
+`shelly-netwatch.example.ini` shows every value in file form.
 
 ---
 
-## Fehlersuche
+## Troubleshooting
 
-| Meldung | Ursache |
+| Message | Cause |
 |---|---|
-| `Connection refused` | Kodi läuft nicht, das Add-on ist aus oder der Web-Editor ist abgeschaltet. Im Add-on: *Einstellungen → Web → Web-Editor aktiv*. |
-| Dashboard nur lokal erreichbar | Im Add-on steht `web_bind` auf `local` (127.0.0.1). Auf „alle Schnittstellen“ stellen oder das Skript auf derselben Box laufen lassen. |
-| `HTTP 401` als offline gewertet | `accept_status` enthält keine 401 – entweder 401 ergänzen oder `dashboard.password` setzen. |
-| `the Shelly requires a password` | In der Shelly ist Authentifizierung aktiv: `shelly.password` eintragen. |
-| `the Shelly rejected the password` | Falsches Passwort. Benutzername ist immer `admin`. |
-| `unknown method Switch.Set` | Ein Gen1-Gerät. Die Gen1-Geräte sprechen `/relay/0?turn=on` statt RPC und werden hier nicht unterstützt. |
-| Steckdose klackert | `offline_after` erhöhen oder `interval` verlängern. |
-| Container erreicht das Dashboard nicht | Aus dem Container heraus prüfen: `docker compose run --rm lcd4linux-shelly test`. Adressen müssen die des LAN sein – `127.0.0.1` zeigt im Container auf den Container selbst. |
-| Container ist `unhealthy` | Der Watcher hat länger als das Dreifache eines Abfragezyklus nichts mehr getan. Ins Log sehen; ein offline gemeldetes Dashboard allein löst das nicht aus. |
-| Zeitstempel im Log gehen falsch | `TZ=Europe/Berlin` setzen. |
+| `no target configured` | `TARGET_URL` / `target.url` is empty. There is no default address – the target has to be named. |
+| `a target without a scheme needs a port` | `192.168.178.104` alone is not enough, the port belongs to it: `192.168.178.104:8050`. |
+| `Connection refused` | Nothing is listening at the target: service off, wrong port, or it only listens on `127.0.0.1`. |
+| Target only reachable locally | The service binds to `127.0.0.1`. Switch it to "all interfaces" or run the script on the same box. |
+| `HTTP 401` counted as offline | `accept_status` does not contain 401 – either add 401 or set `target.password`. |
+| `the Shelly requires a password` | Authentication is enabled on the Shelly: fill in `shelly.password`. |
+| `the Shelly rejected the password` | Wrong password. The username is always `admin`. |
+| `unknown method Switch.Set` | A Gen1 device, which is not supported. |
+| The socket clacks | Raise `offline_after` or lengthen `interval`. |
+| The container does not reach the target | Check from inside: `docker compose run --rm shelly-netwatch test`. Addresses have to be LAN addresses – inside a container `127.0.0.1` points at the container itself. |
+| The container is `unhealthy` | The watcher has done nothing for more than three poll cycles. Look at the log; a target reported offline does not by itself trigger this. |
+| Timestamps in the log are wrong | Set `TZ`, e.g. `TZ=Europe/Berlin`. |
 
-Mehr Details liefert `VERBOSE=true` bzw. `-v`, nachzulesen mit
-`docker compose logs -f` oder `journalctl -u lcd4linux-shelly -f`.
+`VERBOSE=true` or `-v` gives more detail, readable with
+`docker compose logs -f` or `journalctl -u shelly-netwatch -f`.
 
 ---
 
 ## Tests
 
+The suite runs against throwaway servers on localhost, so it needs neither a
+Shelly nor a target of its own:
+
 ```bash
 python3 -m unittest discover -s tests -v
 ```
 
-Die Testsuite startet kleine HTTP-Server auf `127.0.0.1`, die ein Dashboard
-und eine Shelly nachstellen – inklusive Digest-Anmeldung. Geprüft werden
-außerdem die Entprellung, die Nachkorrektur, die Environment-Schicht samt
-`…_FILE` und der Healthcheck. Es wird also weder echte Hardware noch ein
-Netzwerk gebraucht.
-
 ---
 
-## Lizenz
+## License
 
-MIT – siehe [LICENSE](LICENSE).
+MIT – see [LICENSE](LICENSE).
