@@ -323,21 +323,21 @@ class ShellyTest(unittest.TestCase):
         self.assertEqual("S3PL-00112EU", info["model"])
 
     def test_digest_authentication(self):
-        FakeShellyHandler.password = "geheim"
-        shelly = app.Shelly(self.server.url, password="geheim",
+        FakeShellyHandler.password = "s3cret"
+        shelly = app.Shelly(self.server.url, password="s3cret",
                             timeout=2, retries=1)
         shelly.set_output(True)
         self.assertTrue(shelly.output())
 
     def test_wrong_password_is_reported(self):
-        FakeShellyHandler.password = "geheim"
-        shelly = app.Shelly(self.server.url, password="falsch",
+        FakeShellyHandler.password = "s3cret"
+        shelly = app.Shelly(self.server.url, password="wrong",
                             timeout=2, retries=2)
         with self.assertRaises(app.ShellyError):
             shelly.output()
 
     def test_missing_password_is_reported(self):
-        FakeShellyHandler.password = "geheim"
+        FakeShellyHandler.password = "s3cret"
         with self.assertRaises(app.ShellyError) as caught:
             self.shelly.output()
         self.assertIn("password", str(caught.exception))
@@ -507,23 +507,6 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual("5", config["target"]["offline_after"])
         self.assertTrue(app.as_bool(config["behaviour"]["dry_run"]))
 
-    def test_the_old_option_names_still_work(self):
-        args = app.parse_args(["-d", "http://box:8050/",
-                               "--dashboard-password", "geheim"])
-        config = app.apply_overrides(app.load_config(self.empty_config()), args)
-        self.assertEqual("http://box:8050/", config["target"]["url"])
-        self.assertEqual("geheim", config["target"]["password"])
-
-    def test_an_old_dashboard_section_is_read_as_target(self):
-        handle = tempfile.NamedTemporaryFile("w", suffix=".ini", delete=False)
-        handle.write("[dashboard]\nurl = http://box:8050/\noffline_after = 9\n")
-        handle.close()
-        self.addCleanup(os.unlink, handle.name)
-        config = app.load_config(handle.name)
-        self.assertFalse(config.has_section("dashboard"))
-        self.assertEqual("http://box:8050/", config["target"]["url"])
-        self.assertEqual("9", config["target"]["offline_after"])
-
     def test_example_file_parses(self):
         here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         example = os.path.join(here, "shelly-netwatch.example.ini")
@@ -537,9 +520,9 @@ class ConfigTest(unittest.TestCase):
             app.load_config("/definitely/not/here.ini")
 
     def test_as_bool(self):
-        self.assertTrue(app.as_bool("Ja"))
+        self.assertTrue(app.as_bool("Yes"))
         self.assertTrue(app.as_bool("TRUE"))
-        self.assertFalse(app.as_bool("nein"))
+        self.assertFalse(app.as_bool("no"))
         self.assertFalse(app.as_bool(""))
 
 
@@ -587,35 +570,22 @@ class EnvironmentTest(unittest.TestCase):
                                    "SNW_SHELLY_HOST": "prefixed"})
         self.assertEqual("prefixed", config["shelly"]["host"])
 
-    def test_the_old_environment_names_still_work(self):
-        config = self.config_from({"DASHBOARD_URL": "http://box:8050/",
-                                   "DASHBOARD_OFFLINE_AFTER": "7",
-                                   "L4LS_SHELLY_HOST": "10.0.0.5"})
-        self.assertEqual("http://box:8050/", config["target"]["url"])
-        self.assertEqual("7", config["target"]["offline_after"])
-        self.assertEqual("10.0.0.5", config["shelly"]["host"])
-
-    def test_the_new_name_beats_the_old_one(self):
-        config = self.config_from({"TARGET_URL": "http://neu:8050/",
-                                   "DASHBOARD_URL": "http://alt:8050/"})
-        self.assertEqual("http://neu:8050/", config["target"]["url"])
-
     def test_value_from_a_file(self):
         handle = tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False)
-        handle.write("geheim\n")
+        handle.write("s3cret\n")
         handle.close()
         self.addCleanup(os.unlink, handle.name)
         config = self.config_from({"SHELLY_PASSWORD_FILE": handle.name})
-        self.assertEqual("geheim", config["shelly"]["password"])
+        self.assertEqual("s3cret", config["shelly"]["password"])
 
     def test_file_wins_over_the_plain_value(self):
         handle = tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False)
-        handle.write("aus-der-datei")
+        handle.write("from-the-file")
         handle.close()
         self.addCleanup(os.unlink, handle.name)
-        config = self.config_from({"SHELLY_PASSWORD": "im-klartext",
+        config = self.config_from({"SHELLY_PASSWORD": "in-the-clear",
                                    "SHELLY_PASSWORD_FILE": handle.name})
-        self.assertEqual("aus-der-datei", config["shelly"]["password"])
+        self.assertEqual("from-the-file", config["shelly"]["password"])
 
     def test_unreadable_file_stops_the_start(self):
         with self.assertRaises(SystemExit):
@@ -623,18 +593,18 @@ class EnvironmentTest(unittest.TestCase):
 
     def test_environment_beats_the_ini_file(self):
         handle = tempfile.NamedTemporaryFile("w", suffix=".ini", delete=False)
-        handle.write("[shelly]\nhost = aus-der-ini\n")
+        handle.write("[shelly]\nhost = from-the-ini\n")
         handle.close()
         self.addCleanup(os.unlink, handle.name)
-        config = self.config_from({"SHELLY_HOST": "aus-der-umgebung"},
+        config = self.config_from({"SHELLY_HOST": "from-the-environment"},
                                   ini=handle.name)
-        self.assertEqual("aus-der-umgebung", config["shelly"]["host"])
+        self.assertEqual("from-the-environment", config["shelly"]["host"])
 
     def test_command_line_beats_the_environment(self):
-        config = self.config_from({"SHELLY_HOST": "aus-der-umgebung"})
-        args = app.parse_args(["-s", "von-der-kommandozeile"])
+        config = self.config_from({"SHELLY_HOST": "from-the-environment"})
+        args = app.parse_args(["-s", "from-the-command-line"])
         app.apply_overrides(config, args)
-        self.assertEqual("von-der-kommandozeile", config["shelly"]["host"])
+        self.assertEqual("from-the-command-line", config["shelly"]["host"])
 
     def test_empty_environment_changes_nothing(self):
         config = self.config_from({})

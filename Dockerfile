@@ -1,4 +1,4 @@
-# shelly-netwatch - schaltet eine Shelly, solange ein Dienst im Netz antwortet.
+# shelly-netwatch - switches a Shelly while a service on the network answers.
 #
 #   docker build -t shelly-netwatch .
 #   docker run -d --name shelly-netwatch --restart unless-stopped \
@@ -9,11 +9,11 @@
 FROM python:3.13-alpine
 
 LABEL org.opencontainers.image.title="shelly-netwatch" \
-      org.opencontainers.image.description="Schaltet eine Shelly (Gen2/Gen3) nach der Erreichbarkeit eines Dienstes im Netz" \
+      org.opencontainers.image.description="Switches a Shelly (Gen2/Gen3) by the reachability of a service on the network" \
       org.opencontainers.image.source="https://github.com/jamal2362/shelly-netwatch" \
       org.opencontainers.image.licenses="MIT"
 
-# tzdata, damit TZ=Europe/Berlin die Zeitstempel im Log wirklich umstellt.
+# tzdata, so that TZ=Europe/Berlin really moves the timestamps in the log.
 RUN apk add --no-cache tzdata
 
 COPY shelly_netwatch.py /app/shelly_netwatch.py
@@ -23,13 +23,12 @@ ENV PYTHONUNBUFFERED=1 \
     HEARTBEAT_FILE=/tmp/shelly-netwatch.heartbeat \
     COMMAND=watch
 
-# Der Dienst braucht keine Rechte: nur ausgehende Verbindungen.
+# The service needs no privileges: outgoing connections and nothing else.
 RUN adduser -D -H -u 1000 shelly
 USER shelly
 
-# Gesund ist der Container, solange der Watcher weiter abfragt - nicht,
-# solange das Ziel online ist.  Ein ausgeschalteter Dienst ist ein
-# gueltiges Ergebnis und kein Fehler.
+# The container is healthy while the watcher keeps polling - not while the
+# target is online.  A switched-off target is a valid result, not an error.
 HEALTHCHECK --interval=60s --timeout=10s --start-period=30s --retries=3 \
     CMD ["python3", "/app/shelly_netwatch.py", "health"]
 

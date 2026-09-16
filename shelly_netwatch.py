@@ -9,9 +9,7 @@ RPC API):
     target gone       ->  plug switches the 230 V off
 
 Anything that answers on an IP and a port works: a web dashboard, a media
-player, a printer, an access point, a game server.  The LCD4Linux web
-dashboard of the Kodi add-on ``script.lcd4linux`` is one such target and
-the reason this script exists, but nothing here is tied to it.
+player, a printer, an access point, a game server.
 
 Only the standard library is used, so the same file runs on CoreELEC, a
 Raspberry Pi, a NAS or any other box with Python 3.7 or newer.
@@ -95,27 +93,9 @@ ENV_MAP = {
 
 ENV_PREFIX = "SNW_"
 
-# The names this script used while it was called lcd4linux-shelly.  They
-# keep working so an existing container or unit file survives the rename;
-# the new name always wins when both are set.
-LEGACY_ENV_PREFIX = "L4LS_"
-LEGACY_ENV_MAP = {
-    "TARGET_URL": "DASHBOARD_URL",
-    "TARGET_TIMEOUT": "DASHBOARD_TIMEOUT",
-    "TARGET_INTERVAL": "DASHBOARD_INTERVAL",
-    "TARGET_ONLINE_AFTER": "DASHBOARD_ONLINE_AFTER",
-    "TARGET_OFFLINE_AFTER": "DASHBOARD_OFFLINE_AFTER",
-    "TARGET_USERNAME": "DASHBOARD_USERNAME",
-    "TARGET_PASSWORD": "DASHBOARD_PASSWORD",
-    "TARGET_ACCEPT_STATUS": "DASHBOARD_ACCEPT_STATUS",
-}
-
-# Same for the INI file: [dashboard] is read as [target].
-LEGACY_SECTIONS = {"dashboard": "target"}
-
 COMMANDS = ("watch", "once", "status", "on", "off", "test", "health")
 
-TRUE_WORDS = ("1", "true", "yes", "on", "ja", "wahr")
+TRUE_WORDS = ("1", "true", "yes", "on")
 
 
 def as_bool(value):
@@ -128,15 +108,10 @@ def as_bool(value):
 def env_names(name):
     """Every spelling of one setting, most specific first.
 
-    ``SNW_TARGET_URL`` beats ``TARGET_URL``, and both beat the names from
-    the lcd4linux-shelly days (``L4LS_DASHBOARD_URL``, ``DASHBOARD_URL``).
+    ``SNW_TARGET_URL`` beats a bare ``TARGET_URL``; the prefix is there for
+    the cases where a plain name would collide with something else.
     """
-    names = [ENV_PREFIX + name, name]
-    legacy = LEGACY_ENV_MAP.get(name)
-    if legacy:
-        names += [LEGACY_ENV_PREFIX + legacy, legacy]
-    names.append(LEGACY_ENV_PREFIX + name)
-    return names
+    return [ENV_PREFIX + name, name]
 
 
 def env_value(name, environ=None):
@@ -612,26 +587,14 @@ class Watcher(object):
 # configuration and command line
 # ---------------------------------------------------------------------------
 
-CONFIG_NAMES = ("shelly-netwatch.ini", "lcd4linux-shelly.ini")
+CONFIG_NAME = "shelly-netwatch.ini"
 
 
 def config_candidates():
-    """Where an INI file is looked for, best name first."""
-    for name in CONFIG_NAMES:
-        yield name
-        yield os.path.expanduser("~/.config/" + name)
-        yield "/etc/" + name
-
-
-def fold_legacy_sections(parser):
-    """Read an old [dashboard] section as if it said [target]."""
-    for old, new in LEGACY_SECTIONS.items():
-        if not parser.has_section(old):
-            continue
-        for option, value in parser.items(old):
-            parser.set(new, option, value)
-        parser.remove_section(old)
-    return parser
+    """Where an INI file is looked for, nearest first."""
+    return (CONFIG_NAME,
+            os.path.expanduser("~/.config/" + CONFIG_NAME),
+            "/etc/" + CONFIG_NAME)
 
 
 def load_config(path=None):
@@ -648,7 +611,7 @@ def load_config(path=None):
                 parser.read(candidate, encoding="utf-8")
                 LOG.debug("configuration read from %s", candidate)
                 break
-    return fold_legacy_sections(parser)
+    return parser
 
 
 def apply_environment(config, environ=None):
@@ -749,14 +712,12 @@ def parse_args(argv=None):
                              "/etc/shelly-netwatch.ini.  Every option in it "
                              "can also be given as an environment variable, "
                              "which takes precedence")
-    parser.add_argument("-t", "--target-url", "-d", "--dashboard-url",
-                        metavar="URL", dest="target_url",
+    parser.add_argument("-t", "--target-url", metavar="URL",
                         help="what to watch: an http(s) URL such as "
                              "http://192.168.178.104:8050/api/state, or a bare "
                              "HOST:PORT such as 192.168.178.104:8050 for a "
                              "plain TCP check")
-    parser.add_argument("--target-password", "--dashboard-password",
-                        metavar="PASSWORD", dest="target_password",
+    parser.add_argument("--target-password", metavar="PASSWORD",
                         help="password of the watched service, if it wants one")
     parser.add_argument("-s", "--shelly-host", metavar="HOST",
                         help="address of the Shelly Plug, e.g. 192.168.178.60")
