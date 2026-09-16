@@ -1,6 +1,6 @@
 [Unit]
 Description=Schaltet eine Shelly nach der Erreichbarkeit eines Dienstes im Netz
-Documentation=https://github.com/CE-Repo/shelly-netwatch
+Documentation=https://github.com/jamal2362/shelly-netwatch
 After=network-online.target
 Wants=network-online.target
 

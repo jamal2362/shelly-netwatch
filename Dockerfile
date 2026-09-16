@@ -10,7 +10,7 @@ FROM python:3.13-alpine
 
 LABEL org.opencontainers.image.title="shelly-netwatch" \
       org.opencontainers.image.description="Schaltet eine Shelly (Gen2/Gen3) nach der Erreichbarkeit eines Dienstes im Netz" \
-      org.opencontainers.image.source="https://github.com/CE-Repo/shelly-netwatch" \
+      org.opencontainers.image.source="https://github.com/jamal2362/shelly-netwatch" \
       org.opencontainers.image.licenses="MIT"
 
 # tzdata, damit TZ=Europe/Berlin die Zeitstempel im Log wirklich umstellt.

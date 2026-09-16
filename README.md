@@ -140,7 +140,7 @@ N100 nur Sekunden:
 ssh <benutzer>@<nas-ip>
 sudo mkdir -p /volume1/docker/shelly-netwatch
 cd /volume1/docker/shelly-netwatch
-sudo git clone https://github.com/CE-Repo/shelly-netwatch.git .
+sudo git clone https://github.com/jamal2362/shelly-netwatch.git .
 sudo nano docker-compose.yml     # TARGET_URL und SHELLY_HOST eintragen
 sudo docker compose up -d --build
 sudo docker compose logs -f
@@ -210,7 +210,7 @@ existiert eine `…_FILE`-Variante, die Vorrang hat.
 ## Installation ohne Docker
 
 ```bash
-git clone https://github.com/CE-Repo/shelly-netwatch.git
+git clone https://github.com/jamal2362/shelly-netwatch.git
 cd shelly-netwatch
 
 # Konfiguration anlegen und die beiden Adressen eintragen
